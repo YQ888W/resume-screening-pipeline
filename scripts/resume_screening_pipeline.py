@@ -132,6 +132,14 @@ FEEDBACK_COLUMN_ALIASES = {
 }
 
 
+PII_PATTERNS = [
+    ("EMAIL", re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")),
+    ("URL", re.compile(r"(?i)\b(?:https?://|www\.)[^\s<>()\"']+|\b(?:linkedin\.com|github\.com|gitlab\.com|gitee\.com|behance\.net|dribbble\.com|kaggle\.com|zhihu\.com|xhslink\.com)/[^\s<>()\"']+")),
+    ("CN_ID", re.compile(r"\b[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b")),
+    ("PHONE", re.compile(r"(?<!\d)(?:\+?86[-\s]?)?1[3-9]\d[-\s]?\d{4}[-\s]?\d{4}(?!\d)|(?<!\d)(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}(?!\d)")),
+]
+
+
 SYSTEM_EXTRACT = """You extract structured candidate facts from resumes.
 Return only valid JSON. Do not invent names, schools, dates, locations, employers, or facts.
 Use empty strings or empty arrays for unknown fields.
@@ -357,16 +365,63 @@ def vision_extract_text(path: Path) -> str:
     return chat_completion(VISION_MODEL, [{"role": "user", "content": content}], max_tokens=6000, temperature=0)
 
 
-def extraction_prompt(resume: ResumeFile, text: str, parse_meta: dict[str, Any]) -> list[dict[str, Any]]:
+def redact_pii_text(text: str, mode: str = "contact") -> tuple[str, dict[str, list[str]]]:
+    if mode == "off" or not text:
+        return text, {}
+    redacted = text
+    pii_map: dict[str, list[str]] = {}
+    for label, pattern in PII_PATTERNS:
+        seen: list[str] = []
+
+        def repl(match: re.Match[str]) -> str:
+            value = match.group(0)
+            try:
+                idx = seen.index(value) + 1
+            except ValueError:
+                seen.append(value)
+                idx = len(seen)
+            return f"[{label}_{idx}]"
+
+        redacted = pattern.sub(repl, redacted)
+        if seen:
+            pii_map[label] = seen
+    return redacted, pii_map
+
+
+def merge_pii_maps(*maps: dict[str, list[str]]) -> dict[str, list[str]]:
+    merged: dict[str, list[str]] = {}
+    for item in maps:
+        for label, values in item.items():
+            target = merged.setdefault(label, [])
+            for value in values:
+                if value not in target:
+                    target.append(value)
+    return merged
+
+
+def first_pii(record: dict[str, Any], label: str) -> str:
+    values = ((record.get("local_pii") or {}).get(label) or [])
+    return str(values[0]) if values else ""
+
+
+def all_pii(record: dict[str, Any], label: str) -> str:
+    values = ((record.get("local_pii") or {}).get(label) or [])
+    return "\n".join(str(v) for v in values if v)
+
+
+def extraction_prompt(resume: ResumeFile, text: str, parse_meta: dict[str, Any], privacy_mode: str = "contact") -> list[dict[str, Any]]:
+    source_file = resume.relpath if privacy_mode == "off" else resume.candidate_id
+    filename_hint = resume.path.name if privacy_mode == "off" else ""
     payload = {
         "candidate_id": resume.candidate_id,
-        "source_file": resume.relpath,
-        "filename_hint": resume.path.name,
+        "source_file": source_file,
+        "filename_hint": filename_hint,
         "schema": EXTRACT_SCHEMA,
         "instructions": [
             "Extract only facts supported by the resume text or filename.",
             "Do not let the source folder name determine fit.",
             "Use concise evidence; include original wording where helpful.",
+            "If resume text contains placeholders such as [EMAIL_1], [PHONE_1], [URL_1], or [CN_ID_1], treat them as redacted private data and do not infer the original value.",
         ],
         "parse_meta": {k: v for k, v in parse_meta.items() if k != "text"},
         "resume_text": text[:55000],
@@ -407,6 +462,8 @@ def process_one(
     work_dir: Path,
     force: bool = False,
     feedback_map: dict[str, dict[str, str]] | None = None,
+    privacy_mode: str = "contact",
+    allow_vision_with_pii: bool = False,
 ) -> dict[str, Any]:
     out_path = record_path(work_dir, resume)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -416,26 +473,38 @@ def process_one(
     parse_meta = local_text_for_file(resume.path)
     text = parse_meta.get("text") or ""
     if parse_meta.get("needs_vision"):
-        try:
-            vtext = vision_extract_text(resume.path)
-            if len(vtext.strip()) > len(text.strip()):
-                text = vtext
-                parse_meta["parse_status"] = "vision_text"
-        except Exception as e:
-            parse_meta["vision_error"] = str(e)
+        if privacy_mode != "off" and not allow_vision_with_pii:
+            parse_meta["vision_skipped_for_privacy"] = True
+        else:
+            try:
+                vtext = vision_extract_text(resume.path)
+                if len(vtext.strip()) > len(text.strip()):
+                    text = vtext
+                    parse_meta["parse_status"] = "vision_text"
+            except Exception as e:
+                parse_meta["vision_error"] = str(e)
+
+    redacted_text, text_pii = redact_pii_text(text, privacy_mode)
+    redacted_filename, filename_pii = redact_pii_text(resume.path.name, privacy_mode)
+    local_pii = merge_pii_maps(text_pii, filename_pii)
+    if redacted_filename != resume.path.name:
+        parse_meta["redacted_filename_hint"] = redacted_filename
 
     record: dict[str, Any] = {
         "candidate_id": resume.candidate_id,
         "source_file": resume.relpath,
         "source_file_hash": resume.sha1,
         "local_parse": {k: v for k, v in parse_meta.items() if k != "text"},
+        "privacy_mode": privacy_mode,
+        "local_pii": local_pii,
         "text_chars": len(text),
+        "redacted_text_chars": len(redacted_text),
     }
     if feedback_map and resume.candidate_id in feedback_map:
         record["human_feedback"] = feedback_map[resume.candidate_id]
 
     try:
-        raw = chat_completion(EXTRACT_MODEL, extraction_prompt(resume, text, parse_meta), max_tokens=7000, temperature=0.05)
+        raw = chat_completion(EXTRACT_MODEL, extraction_prompt(resume, redacted_text, parse_meta, privacy_mode), max_tokens=7000, temperature=0.05)
         record["extraction"] = parse_json_object(raw)
         record["extract_status"] = "ok"
     except Exception as e:
@@ -478,10 +547,12 @@ def score_existing(
     jd: dict[str, Any],
     work_dir: Path,
     feedback_map: dict[str, dict[str, str]] | None = None,
+    privacy_mode: str = "contact",
+    allow_vision_with_pii: bool = False,
 ) -> dict[str, Any]:
     path = record_path(work_dir, resume)
     if not path.exists():
-        return process_one(resume, jd, work_dir, force=False, feedback_map=feedback_map)
+        return process_one(resume, jd, work_dir, force=False, feedback_map=feedback_map, privacy_mode=privacy_mode, allow_vision_with_pii=allow_vision_with_pii)
     record = json.loads(path.read_text(encoding="utf-8"))
     if feedback_map and resume.candidate_id in feedback_map:
         record["human_feedback"] = feedback_map[resume.candidate_id]
@@ -614,9 +685,9 @@ def rows_from_records(records: list[dict[str, Any]], jd: dict[str, Any] | None =
             "过往经历概况": s.get("core_related_experience", ""),
             "需要注意的点": s.get("main_risks_or_missing_info", ""),
             "学历背景": education_summary(e),
-            "邮箱": e.get("email", ""),
-            "电话": e.get("phone", ""),
-            "链接": safe_text(e.get("links"), 500),
+            "邮箱": first_pii(r, "EMAIL") or e.get("email", ""),
+            "电话": first_pii(r, "PHONE") or e.get("phone", ""),
+            "链接": all_pii(r, "URL") or safe_text(e.get("links"), 500),
             "原始文件名": r.get("source_file", ""),
             "解析状态": f"{r.get('extract_status', '')}/{r.get('screen_status', '')}",
         }
@@ -790,7 +861,7 @@ def run_batch(args: argparse.Namespace) -> None:
     print(f"processing {len(files)} resumes with {EXTRACT_MODEL} + {SCREEN_MODEL}")
     records = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(process_one, rf, jd, work_dir, args.force, feedback_map): rf for rf in files}
+        futs = {ex.submit(process_one, rf, jd, work_dir, args.force, feedback_map, args.privacy_mode, args.allow_vision_with_pii): rf for rf in files}
         for i, fut in enumerate(as_completed(futs), 1):
             rf = futs[fut]
             try:
@@ -818,7 +889,7 @@ def run_retry_failures(args: argparse.Namespace) -> None:
     files = [files_by_id[x] for x in failed_ids if x in files_by_id]
     print(f"retrying {len(files)} failures")
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(process_one, rf, jd, work_dir, True, feedback_map): rf for rf in files}
+        futs = {ex.submit(process_one, rf, jd, work_dir, True, feedback_map, args.privacy_mode, args.allow_vision_with_pii): rf for rf in files}
         for i, fut in enumerate(as_completed(futs), 1):
             rf = futs[fut]
             record = fut.result()
@@ -835,7 +906,7 @@ def run_score_only(args: argparse.Namespace) -> None:
         print(f"loaded human feedback for {len(feedback_map)} candidates")
     files = selected_files(args)
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = {ex.submit(score_existing, rf, jd, work_dir, feedback_map): rf for rf in files}
+        futs = {ex.submit(score_existing, rf, jd, work_dir, feedback_map, args.privacy_mode, args.allow_vision_with_pii): rf for rf in files}
         for i, fut in enumerate(as_completed(futs), 1):
             rf = futs[fut]
             record = fut.result()
@@ -878,6 +949,8 @@ def add_run_io(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-copy", action="store_true")
     parser.add_argument("--feedback-file", default="", help="Edited screening_summary.csv or resume_screening_results.xlsx with human feedback columns")
+    parser.add_argument("--privacy-mode", choices=["contact", "off"], default="contact", help="contact: redact emails/phones/URLs/IDs locally before model calls; off: send extracted text as-is")
+    parser.add_argument("--allow-vision-with-pii", action="store_true", help="Allow sending image/scanned resumes to the vision model even when privacy-mode is contact")
 
 
 def main() -> None:
