@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.email_download_state.json
+work/
+results/
+resumes/
