@@ -17,6 +17,12 @@ import email_attachment_downloader as email_downloader  # noqa: E402
 
 
 class PipelineTests(unittest.TestCase):
+    def test_skill_requires_source_confirmation_before_file_discovery(self) -> None:
+        skill_text = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("## 第 0 步：确认简历来源", skill_text)
+        self.assertIn("没有默认来源", skill_text)
+        self.assertIn("不要扫描工作区之外", skill_text)
+
     def test_candidate_ids_survive_rename_and_new_files(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
