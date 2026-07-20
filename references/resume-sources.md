@@ -1,98 +1,63 @@
-# 简历来源
+# 简历来源和能力边界
 
-本 skill 把本地 `resumes/` 文件夹作为标准输入。真实 HR 工作里，这个文件夹通常来自上游采集步骤。
+流水线统一从本地 `resumes/` 读取简历。agent 负责把上游文件复制或下载到这里，不修改原始来源。
 
-## 支持的来源
+## 来源能力表
 
-### 本地手动整理
+| 来源 | 当前能力 | 没有访问能力时怎么办 |
+|---|---|---|
+| 本地文件夹 | 内置支持，复制后直接盘点 | 无需额外操作 |
+| 邮箱附件 | 内置 IMAP 下载器，支持授权码/客户端密码 | OAuth-only 邮箱由管理员开通，或手动导出附件 |
+| 飞书多维表格 | agent 有飞书 connector 时可下载附件并保留 record id | 从飞书批量下载后放入本地文件夹 |
+| ATS / 招聘网站 | agent 有对应 API/connector 时可导出 | 在系统中批量导出简历和候选人 CSV |
+| 云盘 | agent 能访问共享盘或本地同步目录时可复制 | 用户下载或同步到本地 |
 
-适用于用户已经有 PDF、DOCX、图片版简历的情况。
+不要把“可以接入”描述成“内置支持”。执行前先检查当前 coding agent 是否拥有对应 connector 和权限。
 
-推荐结构：
+## 本地文件
 
-```text
-screening-run/
-├── job_requirements.md
-├── resumes/
-│   ├── candidate-a.pdf
-│   ├── candidate-b.docx
-│   └── candidate-c.png
-└── results/
-```
+直接读取 PDF、DOCX、TXT、JPG、JPEG、PNG。旧版 `.doc` 会在 inventory 中标记，但需要先转换成 PDF 或 DOCX。
 
-### 邮箱附件
+将源文件复制到本次运行目录。保留原文件名；候选人 ID 由 `work/candidate_index.json` 稳定维护，不依赖文件排序。
 
-适用于简历来自招聘网站、内推、猎头、候选人主动投递等邮件附件。
+## 邮箱附件
 
-推荐流程：
-
-1. 确认邮箱服务商、账号、是否能使用 IMAP。
-2. 确认日期范围、发件人关键词、主题关键词、附件类型。
-3. 用 `scripts/email_attachment_downloader.py` 下载附件到 `resumes/`。
-4. 保留 `_source_manifest.csv`，记录 message id、发件人、日期、标题、附件名、本地文件名、hash。
-5. 再用本 skill 对 `resumes/` 跑 JD 驱动筛选。
-
-腾讯企业邮箱示例：
+先确认邮箱服务商、日期范围、发件人/主题/附件关键词。授权码默认隐藏输入：
 
 ```bash
-python3 scripts/email_attachment_downloader.py \
+python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
   --provider tencent-exmail \
   --username you@company.com \
-  --password '<客户端专用密码>' \
   --save-dir ./resumes \
   --days-back 30 \
   --subject-keyword 简历
 ```
 
-通用 IMAP 示例：
+自定义 IMAP：
 
 ```bash
-python3 scripts/email_attachment_downloader.py \
+python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
   --server imap.example.com \
   --port 993 \
   --username hr@example.com \
-  --password '<客户端密码或授权码>' \
   --save-dir ./resumes \
-  --from-keyword jobs \
   --filename-keyword resume
 ```
 
-### 招聘网站导出
+下载器生成 `_source_manifest.csv`，记录 message id、发件人、日期、标题、原附件名、本地文件名和 hash。多岗位时，脚本会把邮件标题作为投递岗位提示，但不会把来源渠道当作匹配证据。
 
-适用于 Boss 直聘、LinkedIn、Indeed、Lever、Greenhouse、Ashby 等系统。
+## ATS、招聘网站、飞书和云盘
 
-推荐流程：
+1. 检查当前 agent 是否有对应 connector 和读取权限。
+2. 有权限时下载附件，并保留候选人记录 ID 到本地文件名的映射。
+3. 没权限时让用户从系统批量导出，不要求用户逐份下载。
+4. 元数据 CSV 放在 `resumes/` 同级或保留为来源 manifest。
+5. 只有用户明确要求并确认后，才把筛选结果写回外部系统。
 
-1. 导出或下载所有简历到 staging 文件夹。
-2. 如果文件名包含候选人或岗位信息，尽量保留原文件名。
-3. 如果有候选人元数据 CSV，把它放在 `resumes/` 同级，最终报告里说明来源。
-4. 筛选前先跑 inventory，检查空白文件、扫描件和不支持格式。
+## 去重和追溯
 
-### 飞书多维表格附件
-
-适用于简历存在飞书 Base / 多维表格附件列的情况。
-
-推荐流程：
-
-1. 下载相关记录的附件文件。
-2. 保留 record id 到本地文件名的映射表。
-3. 跑筛选。
-4. 如果用户要求回写推荐等级或备注，必须先确认，不能自动写回。
-
-### 云盘文件夹
-
-适用于 Google Drive、SharePoint、Box、Dropbox、本地同步文件夹。
-
-推荐流程：
-
-1. 确认文件可以本地访问或下载。
-2. 复制到本次运行专属的 `resumes/`，不要直接改共享源文件夹。
-3. 如果文件归属、上传时间、来源目录重要，保留 manifest。
-
-## 来源规则
-
-- 不要只因为来源渠道判断候选人是否匹配。
-- 来源信息用于追溯、去重、岗位投递上下文和后续联系，不是评分本身。
-- 不要修改、删除、重命名原始来源文件；先复制到运行文件夹。
-- 邮箱和招聘网站导入时，优先用文件 hash、message id、候选人 profile id 去重。
-- 公开 demo 里删除候选人联系方式、邮件来源和私有 ID。
+- 邮件使用附件 hash 和 message id 去重。
+- 本地相同内容的重复文件按 hash 合并为一个候选人输入。
+- 来源信息用于追溯、岗位路由和后续联系，不参与匹配评分。
+- 不删除、重命名或覆盖原始来源文件。
+- 公开示例删除候选人联系方式、邮件来源和私有 ID。

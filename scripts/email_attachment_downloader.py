@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import csv
 import email
+import getpass
 import hashlib
 import imaplib
 import json
@@ -40,7 +41,7 @@ PROVIDERS = {
     "zoho": ("imap.zoho.com", 993),
 }
 
-DEFAULT_EXTENSIONS = [".pdf", ".docx", ".doc", ".jpg", ".jpeg", ".png"]
+DEFAULT_EXTENSIONS = [".pdf", ".docx", ".doc", ".txt", ".jpg", ".jpeg", ".png"]
 
 
 def decode_mime(value: str | None) -> str:
@@ -49,7 +50,10 @@ def decode_mime(value: str | None) -> str:
     chunks = []
     for part, enc in decode_header(value):
         if isinstance(part, bytes):
-            chunks.append(part.decode(enc or "utf-8", errors="replace"))
+            try:
+                chunks.append(part.decode(enc or "utf-8", errors="replace"))
+            except LookupError:
+                chunks.append(part.decode("utf-8", errors="replace"))
         else:
             chunks.append(str(part))
     return "".join(chunks)
@@ -97,7 +101,24 @@ def append_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         if not exists:
             writer.writeheader()
-        writer.writerows(rows)
+        writer.writerows({key: csv_safe(value) for key, value in row.items()} for row in rows)
+
+
+def load_manifest_hashes(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    with path.open(newline="", encoding="utf-8-sig") as handle:
+        return {
+            str(row.get("sha1") or "").strip()
+            for row in csv.DictReader(handle)
+            if str(row.get("sha1") or "").strip()
+        }
+
+
+def csv_safe(value: Any) -> Any:
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + value
+    return value
 
 
 def unique_path(save_dir: Path, filename: str) -> Path:
@@ -180,8 +201,7 @@ def download(args: argparse.Namespace) -> int:
     manifest_path = save_dir / "_source_manifest.csv"
     state = load_state(state_path)
     seen_keys = set(state.get("seen_keys", []))
-    seen_hashes = set(state.get("seen_hashes", []))
-    rows: list[dict[str, Any]] = []
+    seen_hashes = set(state.get("seen_hashes", [])) | load_manifest_hashes(manifest_path)
     new_count = 0
 
     mail = connect(args)
@@ -222,7 +242,7 @@ def download(args: argparse.Namespace) -> int:
                 seen_keys.add(dedupe_key)
                 seen_hashes.add(digest)
                 new_count += 1
-                rows.append({
+                row = {
                     "local_file": target.name,
                     "source_type": "email",
                     "mailbox": args.mailbox,
@@ -234,6 +254,11 @@ def download(args: argparse.Namespace) -> int:
                     "original_attachment": original_name,
                     "sha1": digest,
                     "size_bytes": len(payload),
+                }
+                append_manifest(manifest_path, [row])
+                save_state(state_path, {
+                    "seen_keys": sorted(seen_keys),
+                    "seen_hashes": sorted(seen_hashes),
                 })
                 print(f"downloaded: {target.name}")
     finally:
@@ -245,7 +270,6 @@ def download(args: argparse.Namespace) -> int:
     state["seen_keys"] = sorted(seen_keys)
     state["seen_hashes"] = sorted(seen_hashes)
     save_state(state_path, state)
-    append_manifest(manifest_path, rows)
     print(f"new attachments: {new_count}")
     print(f"manifest: {manifest_path}")
     return new_count
@@ -267,18 +291,20 @@ def main() -> None:
     parser.add_argument("--server", default="", help="Custom IMAP server")
     parser.add_argument("--port", type=int, default=993)
     parser.add_argument("--username", required=True)
-    parser.add_argument("--password", default=os.getenv("IMAP_PASSWORD", ""), help="IMAP/client password; can also use IMAP_PASSWORD env var")
+    parser.add_argument("--password", default=os.getenv("IMAP_PASSWORD", ""), help=argparse.SUPPRESS)
     parser.add_argument("--save-dir", required=True)
     parser.add_argument("--mailbox", default="INBOX")
     parser.add_argument("--days-back", type=int, default=30)
-    parser.add_argument("--limit", type=int, default=0, help="Only inspect the newest N matching messages after date search")
+    parser.add_argument("--limit", type=int, default=0, help="Only inspect the newest N messages after the date filter, before subject/sender filters")
     parser.add_argument("--from-keyword", default="", help="Require sender header to contain this text")
     parser.add_argument("--subject-keyword", action="append", default=[], help="Require subject to contain this text; repeatable")
     parser.add_argument("--filename-keyword", action="append", default=[], help="Require attachment filename to contain this text; repeatable")
-    parser.add_argument("--extensions", type=parse_extensions, default=DEFAULT_EXTENSIONS, help="Comma-separated extensions; default pdf,docx,doc,jpg,jpeg,png")
+    parser.add_argument("--extensions", type=parse_extensions, default=DEFAULT_EXTENSIONS, help="Comma-separated extensions; default pdf,docx,doc,txt,jpg,jpeg,png")
     args = parser.parse_args()
     if not args.password:
-        raise SystemExit("Missing --password or IMAP_PASSWORD")
+        args.password = getpass.getpass("请输入邮箱客户端专用密码/授权码（输入不会显示）：")
+    if not args.password:
+        raise SystemExit("未输入邮箱客户端专用密码/授权码")
     try:
         download(args)
     except imaplib.IMAP4.error as e:

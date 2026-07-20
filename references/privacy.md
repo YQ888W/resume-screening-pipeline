@@ -7,7 +7,7 @@
 默认使用 `--privacy-mode contact`：
 
 ```bash
-python3 scripts/resume_screening_pipeline.py run \
+python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
   --resumes ./resumes \
   --jd ./job_requirements.md \
   --work ./work \
@@ -29,7 +29,9 @@ python3 scripts/resume_screening_pipeline.py run \
 
 ## 扫描件和图片简历
 
-扫描件 / 图片版简历需要视觉模型或 OCR 才能读。如果开启 `--privacy-mode contact`，脚本默认不会把原始图片发给视觉模型，因为图片里可能包含完整手机号、邮箱、地址和照片。
+扫描件 / 图片版简历需要 OCR 才能读。如果开启 `--privacy-mode contact`，脚本会先尝试本地 `pytesseract` OCR，再对文字脱敏；默认不会把原始图片发给视觉模型，因为图片里可能包含完整手机号、邮箱、地址和照片。
+
+本地 OCR 需要安装 Python 依赖以及系统 Tesseract，并保证中文和英文语言包可用。可用 `OCR_LANG` 调整语言，默认 `chi_sim+eng`。如果本地 OCR 不可用，记录会明确标为 `需复核`，不会拿空白文本强行评分。
 
 如果用户确认公司允许把原始图片发给模型，可以显式加：
 
@@ -37,7 +39,7 @@ python3 scripts/resume_screening_pipeline.py run \
 --allow-vision-with-pii
 ```
 
-更稳妥的做法是先使用本地 OCR 工具把图片转成文本，再对文本做本地脱敏。
+如果不希望尝试本地 OCR，可以使用 `--no-local-ocr`；此时隐私模式下的图片简历会直接进入人工复核。
 
 ## 什么时候需要更严格
 

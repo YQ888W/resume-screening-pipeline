@@ -1,6 +1,8 @@
 # 主流邮箱配置
 
-邮箱下载使用 IMAP。一般需要开启 IMAP，并使用客户端专用密码/授权码，而不是网页登录密码。
+邮箱下载器使用基础 IMAP 登录。一般需要开启 IMAP，并使用客户端专用密码/授权码，而不是网页登录密码。脚本不内置 OAuth；如果组织强制 OAuth，需要管理员提供可用的应用认证，或先从邮箱导出附件。
+
+运行时不要把授权码写在 `--password` 参数里。省略密码参数后，脚本会在终端中隐藏输入；也可以临时设置 `IMAP_PASSWORD` 环境变量，但不要写入仓库文件。
 
 ## 腾讯企业邮箱
 
@@ -64,7 +66,7 @@
 使用建议：
 
 - 账号需要允许 IMAP。
-- Google 官方建议优先用 OAuth；如果使用 app password，通常需要开启两步验证。
+- 这个 preset 只适用于账号仍允许 IMAP app password 的情况。强制 OAuth 的 Google Workspace 组织不能直接使用当前下载器。
 
 ## Outlook / Microsoft 365
 
@@ -83,7 +85,7 @@
 使用建议：
 
 - 部分 Microsoft 365 组织默认禁用 IMAP，需管理员开启。
-- Outlook.com / Microsoft 365 可能要求现代认证；如果 IMAP 密码登录失败，不一定是密码错，可能是组织策略不允许。
+- 这个 preset 只适用于组织允许 IMAP 客户端密码的情况。许多 Microsoft 365 组织强制现代认证；登录失败不一定是密码错。
 
 ## 网易 163 / 126
 
@@ -113,11 +115,10 @@
 如果不是上述邮箱：
 
 ```bash
-python3 scripts/email_attachment_downloader.py \
+python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
   --server imap.example.com \
   --port 993 \
   --username hr@example.com \
-  --password '<客户端密码或授权码>' \
   --save-dir ./resumes
 ```
 
@@ -127,3 +128,4 @@ python3 scripts/email_attachment_downloader.py \
 - 连接失败：检查 IMAP 是否开启、端口 993 是否可用、公司网络是否拦截。
 - 没下载到附件：放宽 `--subject-keyword` 和 `--filename-keyword`。
 - 重复下载：确认 `.email_download_state.json` 没被删除。
+- Gmail / Microsoft 365 一直登录失败：确认组织是否强制 OAuth；当前脚本不绕过组织认证策略。

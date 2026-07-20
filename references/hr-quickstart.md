@@ -18,6 +18,7 @@ agent 会负责：
 - 如果关键信息缺失，只追问会影响筛选结果的问题。
 - 自动创建运行文件夹、`resumes/`、`work/`、`results/`。
 - 把简历复制或下载到 `resumes/`。
+- 开始前自动检查文件、模型配置和扫描件情况，发现问题先告诉你。
 - 先跑 3-5 份小样本试跑，让你确认口径。
 - 默认先在本地把邮箱、电话、个人链接和证件号脱敏，再把简历文本发给模型；最终 Excel 会把本地联系方式合并回来，方便你联系候选人。
 
@@ -63,8 +64,9 @@ screening-run/
 4. agent 创建文件夹、收集简历、先跑 3-5 份小样本试跑。
 5. 打开 `results/resume_screening_results.xlsx`，抽检 `筛选总表`。
 6. 如果不同意某些 AI 判断，直接在 Excel 的 `人工初筛结果` 和 `人工初筛判断依据` 两列里改，保存文件。
-7. 让 agent 读取这个 Excel，修正筛选标准并重评。
-8. 口径确认后，agent 跑全量。
+7. 让 agent 读取这个 Excel，先生成一份筛选标准修正建议。
+8. 你确认建议后，agent 再更新标准并重评 pilot。
+9. 口径确认后，agent 跑全量。
 
 ## 怎么看结果
 
@@ -89,7 +91,9 @@ screening-run/
 请读取 results/resume_screening_results.xlsx，根据我的反馈修正筛选标准，并重新评分。
 ```
 
-agent 会读取你本地保存的 Excel，对比 AI 初筛和你的人工判断，把可复用的修正写回 `job_requirements.md`，再重新生成结果表。
+agent 会读取你本地保存的 Excel，对比 AI 初筛和你的人工判断，生成 `feedback_calibration.md`。它会先把可复用的修正建议给你确认，不会静默改变筛选标准；确认后再写回 `job_requirements.md` 并重新生成结果表。
+
+Excel 自带一个 `使用说明` sheet。即使你之后把文件单独发给同事，对方也能看到黄色列怎么填写，以及保存后如何让 agent 重评。
 
 ## 小样本试跑后怎么反馈
 

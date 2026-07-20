@@ -17,7 +17,7 @@
 第一次跑或 JD 不清楚时：
 
 ```bash
-python3 scripts/resume_screening_pipeline.py run \
+python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
   --resumes ./resumes \
   --jd ./job_requirements.md \
   --work ./work \
@@ -31,7 +31,7 @@ python3 scripts/resume_screening_pipeline.py run \
 pilot 口径确认后：
 
 ```bash
-python3 scripts/resume_screening_pipeline.py run \
+python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
   --resumes ./resumes \
   --jd ./job_requirements.md \
   --work ./work \
@@ -44,7 +44,7 @@ python3 scripts/resume_screening_pipeline.py run \
 供应商稳定、限流少时：
 
 ```bash
-python3 scripts/resume_screening_pipeline.py run \
+python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
   --resumes ./resumes \
   --jd ./job_requirements.md \
   --work ./work \
@@ -59,7 +59,7 @@ python3 scripts/resume_screening_pipeline.py run \
 全量后跑：
 
 ```bash
-python3 scripts/resume_screening_pipeline.py retry-failures \
+python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" retry-failures \
   --resumes ./resumes \
   --jd ./job_requirements.md \
   --work ./work \
