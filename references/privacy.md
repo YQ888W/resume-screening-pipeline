@@ -25,7 +25,7 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
 
 这种模式适合大多数招聘初筛：模型仍然能看到岗位相关经历、公司、title、项目、技能和教育背景，但不需要看到候选人的联系方式。
 
-不要把 `work/records/`、`work/all_records.json` 或带真实联系方式的结果表上传到公开仓库或社媒。这些本地运行产物可能包含原始联系方式映射。
+不要把 `work/records/`、`work/all_records.json`、`_email_message_manifest.csv` 或带真实联系方式的结果表上传到公开仓库或社媒。这些本地运行产物可能包含原始联系方式、邮件信息或带访问参数的平台链接。
 
 ## 扫描件和图片简历
 

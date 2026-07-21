@@ -1,4 +1,4 @@
 interface:
   display_name: "简历批量筛选流水线"
   short_description: "从 JD 和简历批量生成可反馈修正的初筛表"
-  default_prompt: "用 $resume-screening-pipeline 对照这份 JD 批量筛选简历。先确认简历已经在本地，还是需要从邮箱或其他来源下载；来源明确后再做运行前检查和 3-5 份 pilot。我在 Excel 黄色列反馈后，先给我确认筛选标准修正建议，再重评并跑全量。"
+  default_prompt: "用 $resume-screening-pipeline 批量处理简历。先确认简历来源和完整 JD；岗位名、邮件主题、日期、学校预筛等下载过滤规则不等于 JD。JD 不完整时，只完成下载、manifest 和学校预筛，然后问我：请提供完整 JD，或确认是否仅先完成下载和学校预筛。不得自行补写筛选标准或开始 AI 初筛。JD 确认后再做 preflight、3-5 份 pilot、反馈校准和全量。邮箱批量下载优先使用内置 IMAP 脚本，不要逐封操作浏览器。"

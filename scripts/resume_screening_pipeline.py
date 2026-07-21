@@ -65,6 +65,9 @@ except Exception:  # pragma: no cover
 RESUME_EXTS = {".pdf", ".docx", ".doc", ".txt", ".jpg", ".jpeg", ".png"}
 LABELS = ["推荐", "备选", "不推荐", "需复核"]
 CANDIDATE_INDEX_VERSION = 1
+JD_STATUS_CONFIRMED = "confirmed"
+JD_STATUS_DRAFT = "draft"
+JD_STATUS_MISSING = "missing"
 
 
 def uses_zhipu_api(model: str) -> bool:
@@ -488,6 +491,100 @@ def jd_fingerprint(jd: dict[str, Any]) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def jd_status(jd: dict[str, Any]) -> str:
+    explicit = str(jd.get("jd_status") or "").strip()
+    if not explicit:
+        raw = str(jd.get("raw_jd") or "")
+        match = re.search(r"(?im)^\s*(?:[-*]\s*)?JD\s*状态\s*[：:]\s*([^\n#]+)", raw)
+        explicit = match.group(1).strip() if match else ""
+    normalized = explicit.lower().replace("_", " ").strip()
+    if normalized in {"confirmed", "已确认", "已确认可筛选", "已确认可全量"}:
+        return JD_STATUS_CONFIRMED
+    if normalized in {
+        "draft", "pending", "临时草稿", "待确认", "临时草稿/待确认",
+        "临时草稿／待确认", "草稿", "未确认",
+    }:
+        return JD_STATUS_DRAFT
+    return JD_STATUS_MISSING
+
+
+def markdown_section_has_content(raw: str, heading_patterns: list[str]) -> bool:
+    heading = "|".join(heading_patterns)
+    match = re.search(
+        rf"(?ims)^\s*#{{1,6}}\s*(?:{heading})\s*$\n(.*?)(?=^\s*#{{1,6}}\s|\Z)",
+        raw,
+    )
+    if not match:
+        return False
+    content = re.sub(r"(?m)^\s*[-*]\s*$", "", match.group(1)).strip()
+    return bool(content)
+
+
+def jd_missing_requirements(jd: dict[str, Any]) -> list[str]:
+    raw = str(jd.get("raw_jd") or "")
+    checks = [
+        (
+            "岗位名称",
+            bool(jd.get("role_title") or jd.get("roles"))
+            or bool(re.search(r"(?im)^\s*[-*]?\s*岗位名称\s*[：:]\s*\S+", raw)),
+        ),
+        (
+            "岗位职责",
+            bool(jd.get("responsibilities"))
+            or markdown_section_has_content(raw, ["这个人来了之后主要做什么", "岗位职责", "主要工作内容"]),
+        ),
+        (
+            "must-have",
+            bool(jd.get("must_have"))
+            or markdown_section_has_content(raw, [r"必须满足(?:\s*[（(]Must-have[）)])?", "Must-have"]),
+        ),
+        (
+            "nice-to-have",
+            bool(jd.get("nice_to_have"))
+            or markdown_section_has_content(raw, [r"加分项(?:\s*[（(]Nice-to-have[）)])?", "Nice-to-have"]),
+        ),
+        (
+            "一票否决项",
+            bool(jd.get("dealbreakers"))
+            or markdown_section_has_content(raw, [r"一票否决项(?:\s*[（(]Dealbreakers[）)])?", "Dealbreakers"]),
+        ),
+        (
+            "筛选优先级",
+            bool(jd.get("evaluation_priorities"))
+            or markdown_section_has_content(raw, ["筛选优先级"]),
+        ),
+    ]
+    return [name for name, present in checks if not present]
+
+
+def require_screening_jd(
+    jd: dict[str, Any],
+    stage: str,
+    *,
+    allow_draft_pilot: bool = False,
+    limit: int = 0,
+) -> None:
+    status = jd_status(jd)
+    missing = jd_missing_requirements(jd)
+    if status == JD_STATUS_CONFIRMED and not missing:
+        return
+    if (
+        stage == "pilot"
+        and status == JD_STATUS_DRAFT
+        and allow_draft_pilot
+        and 1 <= limit <= 5
+    ):
+        return
+    missing_text = f" 当前还缺少：{'、'.join(missing)}。" if missing else ""
+    raise RuntimeError(
+        "JD 门槛未通过：岗位名称、邮件主题、日期范围、学校预筛等下载过滤规则不等于完整 JD，"
+        "不得据此生成 AI 初筛结果。请提供并确认岗位职责、must-have、nice-to-have、"
+        "一票否决项和筛选优先级，并将 JD 状态标记为‘已确认’。" + missing_text + "如用户明确要求先按粗口径试跑，"
+        "请标记为‘临时草稿/待确认’，且仅可在 run 中使用 --allow-draft-pilot --limit 3（最多 5 份）；"
+        "全量前仍须获得用户确认。"
+    )
+
+
 def jd_is_multi_role(jd: dict[str, Any]) -> bool:
     if jd.get("screening_mode") == "multi_role" or len(jd.get("roles") or []) > 1:
         return True
@@ -717,6 +814,7 @@ def process_one(
         "extract_model": EXTRACT_MODEL,
         "screen_model": SCREEN_MODEL,
         "jd_fingerprint": jd_fingerprint(jd),
+        "jd_status": jd_status(jd),
         "local_pii": local_pii,
         "text_chars": len(text),
         "redacted_text_chars": len(redacted_text),
@@ -768,6 +866,7 @@ def rescore_record(record: dict[str, Any], jd: dict[str, Any], path: Path) -> di
         record["screen_status"] = "ok"
         record["screen_model"] = SCREEN_MODEL
         record["jd_fingerprint"] = jd_fingerprint(jd)
+        record["jd_status"] = jd_status(jd)
         record.pop("screen_error", None)
     except Exception as exc:
         record["screening"] = fallback_screening(record, str(exc))
@@ -1232,6 +1331,8 @@ def copy_categorized(records: list[dict[str, Any]], resume_dir: Path, output_dir
 
 
 def run_inventory(args: argparse.Namespace) -> None:
+    jd = load_jd(Path(args.jd).expanduser().resolve())
+    require_screening_jd(jd, "inventory")
     resume_dir = Path(args.resumes).expanduser().resolve()
     work_dir = Path(args.work).expanduser().resolve()
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -1287,8 +1388,12 @@ def run_preflight(args: argparse.Namespace) -> None:
         jd = {}
     else:
         jd = load_jd(jd_path)
+        try:
+            require_screening_jd(jd, "preflight")
+        except RuntimeError as exc:
+            problems.append(str(exc))
         if len(str(jd.get("raw_jd") or "").strip()) < 40 and not jd.get("roles"):
-            warnings.append("岗位需求内容很短，建议先确认 must-have、加分项和一票否决项。")
+            warnings.append("岗位需求内容很短，请确认岗位职责、must-have、加分项和一票否决项。")
     for model in {EXTRACT_MODEL, SCREEN_MODEL}:
         key_name = model_key_name(model)
         if not os.getenv(key_name):
@@ -1307,6 +1412,7 @@ def run_preflight(args: argparse.Namespace) -> None:
         "resume_count": len(files),
         "file_types": extensions,
         "screening_mode": "多岗位" if jd_is_multi_role(jd) else "单岗位",
+        "jd_status": jd_status(jd),
         "models": {"extract": EXTRACT_MODEL, "screen": SCREEN_MODEL},
         "problems": problems,
         "warnings": warnings,
@@ -1332,16 +1438,28 @@ def selected_files(args: argparse.Namespace) -> list[ResumeFile]:
 def run_batch(args: argparse.Namespace) -> None:
     load_dotenv(Path(args.env).expanduser().resolve() if args.env else None)
     refresh_model_config()
-    validate_model_configuration()
     resume_dir = Path(args.resumes).expanduser().resolve()
     work_dir = Path(args.work).expanduser().resolve()
     output_dir = Path(args.output).expanduser().resolve()
     jd = load_jd(Path(args.jd).expanduser().resolve())
+    require_screening_jd(
+        jd,
+        "pilot" if args.allow_draft_pilot else "run",
+        allow_draft_pilot=args.allow_draft_pilot,
+        limit=args.limit,
+    )
+    validate_model_configuration()
     feedback_map = load_feedback_file(args.feedback_file)
     files = selected_files(args)
     source_manifest = load_source_manifest(resume_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     output_dir.mkdir(parents=True, exist_ok=True)
+    if jd_status(jd) == JD_STATUS_DRAFT:
+        (output_dir / "DRAFT_NOT_FOR_DELIVERY.txt").write_text(
+            "JD 尚未确认。本目录仅为最多 3-5 份简历的临时 pilot，不得作为最终筛选结果或全量交付。\n",
+            encoding="utf-8",
+        )
+        print("警告：JD 为临时草稿/待确认，本次结果仅用于最多 3-5 份 pilot，不得全量或交付。")
     print(f"processing {len(files)} resumes with {EXTRACT_MODEL} + {SCREEN_MODEL}")
     records = []
     with ThreadPoolExecutor(max_workers=args.workers) as ex:
@@ -1374,6 +1492,7 @@ def run_retry_failures(args: argparse.Namespace) -> None:
     validate_model_configuration()
     work_dir = Path(args.work).expanduser().resolve()
     jd = load_jd(Path(args.jd).expanduser().resolve())
+    require_screening_jd(jd, "retry-failures")
     feedback_map = load_feedback_file(args.feedback_file)
     resume_dir = Path(args.resumes).expanduser().resolve()
     files_by_id = {f.candidate_id: f for f in collect_files(resume_dir, work_dir)}
@@ -1406,6 +1525,7 @@ def run_score_only(args: argparse.Namespace) -> None:
     validate_model_configuration([SCREEN_MODEL] if not args.include_new else None)
     work_dir = Path(args.work).expanduser().resolve()
     jd = load_jd(Path(args.jd).expanduser().resolve())
+    require_screening_jd(jd, "score-only")
     feedback_map = load_feedback_file(args.feedback_file)
     if feedback_map:
         print(f"loaded human feedback for {len(feedback_map)} candidates")
@@ -1439,6 +1559,7 @@ def run_calibrate(args: argparse.Namespace) -> None:
     output_dir = Path(args.output).expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     jd = load_jd(Path(args.jd).expanduser().resolve())
+    require_screening_jd(jd, "calibrate")
     feedback_map = load_feedback_file(args.feedback_file)
     if not feedback_map:
         raise RuntimeError("反馈文件里没有找到人工初筛结果或人工初筛判断依据。")
@@ -1467,7 +1588,8 @@ def run_finalize(args: argparse.Namespace) -> None:
     resume_dir = Path(args.resumes).expanduser().resolve()
     work_dir = Path(args.work).expanduser().resolve()
     output_dir = Path(args.output).expanduser().resolve()
-    jd = load_jd(Path(args.jd).expanduser().resolve()) if getattr(args, "jd", "") else None
+    jd = load_jd(Path(args.jd).expanduser().resolve())
+    require_screening_jd(jd, "finalize")
     active_ids = {
         f.candidate_id
         for f in collect_files(resume_dir, work_dir)
@@ -1513,12 +1635,18 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
     p_inv = sub.add_parser("inventory")
     add_common_io(p_inv)
+    p_inv.add_argument("--jd", required=True)
     p_pre = sub.add_parser("preflight")
     add_common_io(p_pre)
     p_pre.add_argument("--jd", required=True)
     p_pre.add_argument("--env", default="")
     p_run = sub.add_parser("run")
     add_run_io(p_run)
+    p_run.add_argument(
+        "--allow-draft-pilot",
+        action="store_true",
+        help="Allow an explicitly marked draft JD for a 1-5 resume pilot only",
+    )
     p_retry = sub.add_parser("retry-failures")
     add_run_io(p_retry)
     p_score = sub.add_parser("score-only")
@@ -1532,6 +1660,7 @@ def main() -> None:
     p_cal.add_argument("--env", default="")
     p_fin = sub.add_parser("finalize")
     add_common_io(p_fin)
+    p_fin.add_argument("--jd", required=True)
     p_fin.add_argument("--output", required=True)
     p_fin.add_argument("--no-copy", action="store_true")
     args = parser.parse_args()

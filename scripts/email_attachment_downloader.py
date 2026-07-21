@@ -22,6 +22,7 @@ import sys
 from datetime import datetime, timedelta
 from email.header import decode_header
 from email.message import Message
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
@@ -42,6 +43,20 @@ PROVIDERS = {
 }
 
 DEFAULT_EXTENSIONS = [".pdf", ".docx", ".doc", ".txt", ".jpg", ".jpeg", ".png"]
+HTTP_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+
+
+class LinkParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() != "a":
+            return
+        for key, value in attrs:
+            if key.lower() == "href" and value and value.startswith(("http://", "https://")):
+                self.links.append(value)
 
 
 def decode_mime(value: str | None) -> str:
@@ -99,6 +114,29 @@ def append_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
     ]
     with path.open("a", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not exists:
+            writer.writeheader()
+        writer.writerows({key: csv_safe(value) for key, value in row.items()} for row in rows)
+
+
+def append_message_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    exists = path.exists()
+    fieldnames = [
+        "mailbox",
+        "sender",
+        "subject",
+        "date",
+        "message_id",
+        "uid",
+        "matching_attachment_count",
+        "new_download_count",
+        "web_link_count",
+        "web_links",
+    ]
+    with path.open("a", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
         if not exists:
             writer.writeheader()
         writer.writerows({key: csv_safe(value) for key, value in row.items()} for row in rows)
@@ -194,15 +232,69 @@ def fetch_message(mail: imaplib.IMAP4_SSL, uid: bytes) -> Message | None:
     return email.message_from_bytes(data[0][1])
 
 
+def fetch_message_headers(mail: imaplib.IMAP4_SSL, uid: bytes) -> Message | None:
+    status, data = mail.uid(
+        "fetch",
+        uid,
+        "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)])",
+    )
+    if status != "OK" or not data or not data[0]:
+        return None
+    return email.message_from_bytes(data[0][1])
+
+
+def decode_text_part(part: Message) -> str:
+    payload = part.get_payload(decode=True)
+    if not isinstance(payload, bytes):
+        return ""
+    charset = part.get_content_charset() or "utf-8"
+    try:
+        return payload.decode(charset, errors="replace")
+    except LookupError:
+        return payload.decode("utf-8", errors="replace")
+
+
+def extract_http_links(msg: Message, limit: int = 30) -> list[str]:
+    links: list[str] = []
+    for part in msg.walk():
+        if part.get_content_maintype() == "multipart":
+            continue
+        if (part.get_content_disposition() or "").lower() == "attachment":
+            continue
+        content_type = part.get_content_type().lower()
+        if content_type not in {"text/plain", "text/html"}:
+            continue
+        text = decode_text_part(part)
+        candidates = HTTP_URL_RE.findall(text)
+        if content_type == "text/html":
+            parser = LinkParser()
+            try:
+                parser.feed(text)
+            except Exception:
+                pass
+            candidates.extend(parser.links)
+        for link in candidates:
+            clean = link.rstrip(".,;:!?)]}\"")
+            if clean and clean not in links:
+                links.append(clean)
+                if len(links) >= limit:
+                    return links
+    return links
+
+
 def download(args: argparse.Namespace) -> int:
     save_dir = Path(args.save_dir).expanduser().resolve()
     save_dir.mkdir(parents=True, exist_ok=True)
     state_path = save_dir / ".email_download_state.json"
     manifest_path = save_dir / "_source_manifest.csv"
+    message_manifest_path = save_dir / "_email_message_manifest.csv"
     state = load_state(state_path)
     seen_keys = set(state.get("seen_keys", []))
     seen_hashes = set(state.get("seen_hashes", [])) | load_manifest_hashes(manifest_path)
     new_count = 0
+    matched_message_count = 0
+    messages_with_attachments = 0
+    link_only_message_count = 0
 
     mail = connect(args)
     try:
@@ -213,13 +305,19 @@ def download(args: argparse.Namespace) -> int:
         print(f"Mailbox {args.mailbox}: {len(uids)} messages in the last {args.days_back} days")
         for uid in uids:
             uid_str = uid.decode("ascii", errors="replace")
-            msg = fetch_message(mail, uid)
-            if msg is None or not should_keep_message(msg, args):
+            header_msg = fetch_message_headers(mail, uid)
+            if header_msg is None or not should_keep_message(header_msg, args):
                 continue
+            msg = fetch_message(mail, uid)
+            if msg is None:
+                continue
+            matched_message_count += 1
             message_id = msg_text_header(msg, "Message-ID") or uid_str
             sender = msg_text_header(msg, "From")
             subject = msg_text_header(msg, "Subject")
             date = msg_text_header(msg, "Date")
+            matching_attachment_count = 0
+            message_new_count = 0
             for part in msg.walk():
                 if part.get_content_maintype() == "multipart":
                     continue
@@ -230,6 +328,7 @@ def download(args: argparse.Namespace) -> int:
                 safe_name = sanitize_filename(original_name)
                 if not should_keep_attachment(safe_name, args):
                     continue
+                matching_attachment_count += 1
                 payload = part.get_payload(decode=True) or b""
                 if not payload:
                     continue
@@ -242,6 +341,7 @@ def download(args: argparse.Namespace) -> int:
                 seen_keys.add(dedupe_key)
                 seen_hashes.add(digest)
                 new_count += 1
+                message_new_count += 1
                 row = {
                     "local_file": target.name,
                     "source_type": "email",
@@ -261,6 +361,23 @@ def download(args: argparse.Namespace) -> int:
                     "seen_hashes": sorted(seen_hashes),
                 })
                 print(f"downloaded: {target.name}")
+            links = extract_http_links(msg)
+            if matching_attachment_count:
+                messages_with_attachments += 1
+            elif links:
+                link_only_message_count += 1
+            append_message_manifest(message_manifest_path, [{
+                "mailbox": args.mailbox,
+                "sender": sender,
+                "subject": subject,
+                "date": date,
+                "message_id": message_id,
+                "uid": uid_str,
+                "matching_attachment_count": matching_attachment_count,
+                "new_download_count": message_new_count,
+                "web_link_count": len(links),
+                "web_links": "\n".join(links),
+            }])
     finally:
         try:
             mail.logout()
@@ -272,6 +389,16 @@ def download(args: argparse.Namespace) -> int:
     save_state(state_path, state)
     print(f"new attachments: {new_count}")
     print(f"manifest: {manifest_path}")
+    print(f"matched messages: {matched_message_count}")
+    print(f"messages with matching attachments: {messages_with_attachments}")
+    print(f"link-only messages: {link_only_message_count}")
+    print(f"message manifest: {message_manifest_path}")
+    if matched_message_count and not messages_with_attachments and link_only_message_count:
+        print(
+            "提示：命中邮件没有可下载附件，主要是网页链接通知。不要用浏览器逐封处理大量邮件；"
+            "优先使用招聘平台批量导出/API，或基于本地 _email_message_manifest.csv 设计批处理。",
+            file=sys.stderr,
+        )
     return new_count
 
 
