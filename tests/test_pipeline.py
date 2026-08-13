@@ -19,6 +19,102 @@ import email_attachment_downloader as email_downloader  # noqa: E402
 
 
 class PipelineTests(unittest.TestCase):
+    def test_openrouter_models_are_rejected(self) -> None:
+        for model in ("z-ai/glm-4.7-flash", "openai/gpt-4.1-mini"):
+            with self.assertRaisesRegex(RuntimeError, "禁止使用 OpenRouter"):
+                pipeline.model_key_name(model)
+            with self.assertRaisesRegex(RuntimeError, "只调用智谱官方 API"):
+                pipeline.api_base(model)
+
+    def test_non_official_zhipu_base_url_is_rejected(self) -> None:
+        with patch.dict(
+            pipeline.os.environ,
+            {"ZHIPUAI_BASE_URL": "https://openrouter.ai/api/v1"},
+            clear=False,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "必须是智谱官方地址"):
+                pipeline.api_base("glm-4.7-flash")
+
+    def test_auto_mode_uses_paid_model_for_large_batches(self) -> None:
+        original = (
+            pipeline.EXTRACT_MODEL,
+            pipeline.SCREEN_MODEL,
+            pipeline.VISION_MODEL,
+            pipeline.PERFORMANCE_MODE,
+        )
+        try:
+            with patch.dict(pipeline.os.environ, {}, clear=True):
+                self.assertEqual(pipeline.refresh_model_config(5, "auto"), "economy")
+                self.assertEqual(pipeline.EXTRACT_MODEL, "glm-4.7-flash")
+                self.assertEqual(pipeline.effective_worker_count(0), 2)
+                self.assertEqual(pipeline.refresh_model_config(20, "auto"), "fast")
+                self.assertEqual(pipeline.EXTRACT_MODEL, "glm-4.7-flashx")
+                self.assertEqual(pipeline.SCREEN_MODEL, "glm-4.7-flashx")
+                self.assertEqual(pipeline.effective_worker_count(0), 6)
+        finally:
+            (
+                pipeline.EXTRACT_MODEL,
+                pipeline.SCREEN_MODEL,
+                pipeline.VISION_MODEL,
+                pipeline.PERFORMANCE_MODE,
+            ) = original
+
+    def test_auto_mode_rejects_stale_openrouter_environment(self) -> None:
+        with patch.dict(
+            pipeline.os.environ,
+            {"EXTRACT_MODEL": "z-ai/glm-4.7-flash"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "OpenRouter 配置"):
+                pipeline.refresh_model_config(50, "auto")
+
+    def test_auto_mode_upgrades_old_free_model_override_for_large_batch(self) -> None:
+        original = (
+            pipeline.EXTRACT_MODEL,
+            pipeline.SCREEN_MODEL,
+            pipeline.VISION_MODEL,
+            pipeline.PERFORMANCE_MODE,
+        )
+        try:
+            with patch.dict(
+                pipeline.os.environ,
+                {"EXTRACT_MODEL": "glm-4.7-flash", "SCREEN_MODEL": "glm-4.7-flash"},
+                clear=True,
+            ):
+                pipeline.refresh_model_config(50, "auto")
+                self.assertEqual(pipeline.EXTRACT_MODEL, "glm-4.7-flashx")
+                self.assertEqual(pipeline.SCREEN_MODEL, "glm-4.7-flashx")
+        finally:
+            (
+                pipeline.EXTRACT_MODEL,
+                pipeline.SCREEN_MODEL,
+                pipeline.VISION_MODEL,
+                pipeline.PERFORMANCE_MODE,
+            ) = original
+
+    def test_docx_uses_markitdown_before_local_parser(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "candidate.docx"
+            path.write_bytes(b"placeholder")
+            with (
+                patch.object(pipeline, "markitdown_text", return_value=("# Candidate\n" + "experience " * 30, "")) as md,
+                patch.object(pipeline, "extract_docx_text") as fallback,
+            ):
+                result = pipeline.local_text_for_file(path)
+            md.assert_called_once_with(path)
+            fallback.assert_not_called()
+            self.assertEqual(result["parse_status"], "markitdown_text")
+            self.assertFalse(result["needs_vision"])
+
+    def test_skill_requires_local_markdown_and_official_zhipu(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        skill_text = (root / "SKILL.md").read_text(encoding="utf-8")
+        agent_text = (root / "agents" / "openai.yaml").read_text(encoding="utf-8")
+        self.assertIn("先在本地用 MarkItDown 转成 Markdown", skill_text)
+        self.assertIn("不得使用 OpenRouter", skill_text)
+        self.assertIn("20 份及以上", skill_text)
+        self.assertIn("只调用智谱官方 API", agent_text)
+
     def test_jd_gate_rejects_download_rules_as_screening_jd(self) -> None:
         download_rules_only = {
             "raw_jd": """# AI 数据分析工程实习生

@@ -23,10 +23,11 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
   --work ./work \
   --output ./results \
   --limit 5 \
+  --performance-mode economy \
   --workers 1
 ```
 
-### 正常模式
+### 批量自动模式
 
 pilot 口径确认后：
 
@@ -36,10 +37,12 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
   --jd ./job_requirements.md \
   --work ./work \
   --output ./results \
-  --workers 2
+  --performance-mode auto
 ```
 
-### 快速模式
+20 份及以上会自动使用智谱官方付费 `glm-4.7-flashx`，默认 6 并发；少于 20 份使用免费 `glm-4.7-flash`，默认 2 并发。
+
+### 强制快速模式
 
 供应商稳定、限流少时：
 
@@ -49,10 +52,10 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
   --jd ./job_requirements.md \
   --work ./work \
   --output ./results \
-  --workers 4
+  --performance-mode fast
 ```
 
-只有在确认 429 / 限流错误很少时，才尝试 `--workers 6` 或 `--workers 8`。扫描件多、图片 PDF 多、网络不稳时，降低并发反而更快，因为失败更少。
+快速模式默认 6 并发。只有在确认 429 / 限流错误很少时，才显式尝试 `--workers 8`；扫描件多或网络不稳时可降到 `--workers 4`。
 
 ## 失败重试
 
@@ -64,6 +67,7 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" retry-failures \
   --jd ./job_requirements.md \
   --work ./work \
   --output ./results \
+  --performance-mode economy \
   --workers 1
 ```
 

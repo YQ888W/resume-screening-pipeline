@@ -16,6 +16,9 @@ description: 当用户要批量筛选简历、对照 JD 初筛候选人、从邮
 - 让 agent 创建运行目录，不要求用户手动建文件夹。
 - 完整 JD 确认后，全量前先跑 3-5 份 pilot，除非用户明确要求跳过。
 - 默认在本地脱敏联系方式；图片简历优先本地 OCR。
+- PDF/DOCX 先在本地用 MarkItDown 转成 Markdown，再把脱敏后的 Markdown 文本交给智谱官方 API；不得使用 OpenRouter。
+- 3-5 份 pilot 默认用免费 `glm-4.7-flash`；20 份及以上的批量在 `auto` 模式下自动使用付费高速 `glm-4.7-flashx` 和更高并发。用户已授权为效率使用该付费模型，不必每批重复询问。
+- 本用户/本招聘筛选工作流已默认授权：如果 PDF/图片简历用本地文本抽取、MarkItDown 和本地 OCR 仍读不出来，不需要逐份再问；agent 应主动用视觉模型读取该简历并继续筛选，命令中加 `--allow-vision-with-pii`。不要把这写成“无条件静默上传所有图片简历”：最终结果里仍必须说明哪些样本使用了视觉解析。
 - 主动说明 Excel 的黄色两列可以手填，保存后可让 AI 校准筛选标准。
 
 没有技术背景的用户先读 `references/hr-quickstart.md`。岗位需求不完整时读 `references/jd-intake.md`；只追问会影响结果的关键问题。
@@ -40,6 +43,17 @@ description: 当用户要批量筛选简历、对照 JD 初筛候选人、从邮
 - 本地已有：确认具体文件夹或用户明确授权的范围，再复制到本次 `resumes/`。
 - 邮箱下载：确认邮箱服务商、账号、日期范围和主题/附件过滤条件，再优先运行内置 IMAP 下载器。
 - 飞书、ATS、招聘网站或云盘：确认具体系统和位置，再检查 connector；没有 connector 时引导批量导出。
+
+### 邮箱来源确认硬规则
+
+通用公开使用时，不要假设用户的邮箱服务商。用户只说“从邮箱导入”“下载邮箱里的简历”“看看邮箱有没有新简历”时，必须先确认邮箱服务商、账号、日期范围和主题/发件人/附件过滤条件，再选择 IMAP preset 或自定义 IMAP 参数。
+
+本用户当前“实习生简历筛选”项目的历史邮箱来源是腾讯/企业微信邮箱 IMAP，不是飞书邮箱。只有在这个本机项目上下文里，用户说“邮箱”“之前那个邮箱”“实习僧发来的简历邮件”“BOSS/实习僧邮件”时，默认按腾讯企业邮箱或用户明确指定的 IMAP 邮箱处理：
+
+- 不要因为本机存在 `lark-cli mail`、飞书授权记录、飞书 skill，或历史会话里出现过飞书命令，就把邮箱来源推断成飞书邮箱。
+- 不要主动发起飞书邮箱 OAuth 授权来读取简历邮件，除非用户明确说“用飞书邮箱”或“飞书邮箱里的邮件”。
+- 如果缺少腾讯邮箱账号、授权码、日期范围或过滤条件，先询问这些信息，或使用本 skill 的 IMAP 下载器生成邮件清单。
+- “飞书”只表示飞书云文档、多维表格、云盘或其他飞书业务系统来源；它不能替代邮箱来源确认。
 
 ## 第 1 步：JD 门槛（硬性阻断）
 
@@ -100,7 +114,7 @@ screening-run/
 
 本地 `resumes/` 是统一输入。来源能力和回退方式见 `references/resume-sources.md`：
 
-- 邮箱附件：内置 IMAP 下载器；认证说明见 `references/email-setup.md`。
+- 邮箱附件/正文简历：内置 IMAP 下载器；认证说明见 `references/email-setup.md`。
 - 本地文件夹：复制到本次运行目录，不修改源文件。
 - 飞书、ATS、招聘网站、云盘：有对应 connector 时由 agent 下载；没有时让用户导出到本地。
 
@@ -115,6 +129,34 @@ python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
   --subject-keyword 简历
 ```
 
+如果用户觉得每次输入授权码麻烦，优先使用 macOS Keychain，而不是把密码明文写进项目文件、shell history、`.env` 或命令参数。第一次保存时，在可见 Codex 终端运行下载命令并加 `--save-password-to-keychain`；脚本仍会用隐藏提示读取一次授权码，登录/下载成功后才保存：
+
+```bash
+python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
+  --provider tencent-exmail \
+  --username you@company.com \
+  --save-dir ./resumes \
+  --days-back 30 \
+  --subject-keyword 简历 \
+  --save-password-to-keychain
+```
+
+之后同一账号可加 `--use-keychain` 自动读取：
+
+```bash
+python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
+  --provider tencent-exmail \
+  --username you@company.com \
+  --save-dir ./resumes \
+  --days-back 30 \
+  --subject-keyword 简历 \
+  --use-keychain
+```
+
+Keychain 默认 service 是 `resume-screening-pipeline-imap`；如同一台机器要区分多套邮箱凭据，可加 `--keychain-service <name>`。即使用 Keychain，也不要在聊天、命令行参数或仓库文件中明文记录邮箱授权码。
+
+用户输入授权码后，下载器会先显示邮箱日期范围内的邮件数量。此时必须说明：下载器正在查找符合主题/发件人/附件条件的简历邮件，并下载命中的附件；如果命中邮件没有附件但正文里包含简历文本，下载器会把邮件正文保存成 `.txt` 简历文件并纳入同一批 `resumes/` 输入。用户需要等待最终统计出现。输出中看到 `Mailbox INBOX: N messages in the last X days` 表示需要检查的邮件数量，不代表正在下载 N 份简历；看到最后的 `new attachments`、`matched messages`、`messages saved from email body` 和 `manifest` 后，才表示下载完成。
+
 ### 邮箱授权码输入位置
 
 如果下载器需要邮箱客户端专用密码/授权码，必须先说清楚输入发生在哪里：
@@ -127,20 +169,46 @@ python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
 
 下载器生成 `_source_manifest.csv`，多岗位筛选会把邮件标题作为投递岗位提示。来源只能用于路由和追溯，不能作为匹配证据。
 
+### 只确认邮箱里的岗位名称
+
+当用户要求“先确认邮箱里的岗位名称”或只想看哪些岗位在投递，不要用假扩展名等隐晦方式避免下载附件。改用下载器的只建清单模式：
+
+```bash
+python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
+  --provider tencent-exmail \
+  --username you@company.com \
+  --save-dir ./email-probe \
+  --days-back 7 \
+  --from-keyword BOSS直聘 \
+  --message-manifest-only
+```
+
+执行前要向用户说明：这一步会扫描日期范围内的邮件头，并只对命中过滤条件的邮件生成 `_email_message_manifest.csv`；不会下载简历附件。还要明确告诉用户“现在正在确认邮箱里的岗位邮件，请等到终端出现最终统计”。输出中看到 `Mailbox INBOX: N messages in the last X days` 表示邮箱中该日期范围内共有 N 封候选邮件需要检查，不代表正在下载 N 份简历；看到最后的 `matched messages` 和 `message manifest` 后，才表示这一步完成。
+
 ### 邮箱批量下载的工具优先级
 
 用户选择邮箱来源后，按以下顺序执行：
 
 1. 对腾讯企业邮箱等已支持服务商，直接使用 `email_attachment_downloader.py` 通过 IMAP 批量读取。内置脚本本身就是邮箱连接方式；不要因为没有 Gmail/Outlook/腾讯邮箱 connector 就改走浏览器。
 2. 即使用户发来的是网页版邮箱链接，也先确认邮箱账号和 IMAP 授权码，再运行脚本。网页登录链接不代表应该逐封网页下载。
-3. 下载器会生成 `_email_message_manifest.csv`，统计命中邮件中哪些有附件、哪些只有招聘平台网页链接。
+3. 下载器会生成 `_email_message_manifest.csv`，统计命中邮件中哪些有附件、哪些正文已保存、哪些只有招聘平台网页链接。
 4. 如果邮件有 PDF/DOCX 等附件，继续由 IMAP 脚本批量下载。
-5. 如果邮件只是实习僧、Boss、ATS 等平台通知链接，IMAP 只能批量取得邮件和链接，不能下载平台登录后的简历。此时优先使用招聘平台批量导出、官方 API 或可复用的批处理脚本。
-6. 浏览器只能用于登录确认、验证码或少量链接 pilot。除非用户明确接受，不要用浏览器逐封处理几十或几百封邮件。
+5. 如果邮件无附件但正文里有候选人简历文本，不要当作缺失；必须提取正文并保存为 `.txt`，在 `_source_manifest.csv` 中标记 `source_type=email_body`，然后进入同一套筛选流程。
+6. 如果邮件只是实习僧、Boss、ATS 等平台通知链接且正文没有简历文本，IMAP 只能批量取得邮件和链接，不能下载平台登录后的简历。此时优先使用招聘平台批量导出、官方 API 或可复用的批处理脚本。
+7. 浏览器只能用于登录确认、验证码或少量链接 pilot。除非用户明确接受，不要用浏览器逐封处理几十或几百封邮件。
 
-发现“命中很多邮件但附件为 0”时，先向用户解释附件型与链接型邮件的区别，不要声称正在用邮箱脚本下载简历，也不要默默切换成逐封浏览器操作。
+发现“命中很多邮件但附件为 0”时，先检查正文是否已经保存为 `.txt`。只有正文也没有可用简历文本时，才向用户解释附件型与链接型邮件的区别；不要声称正在用邮箱脚本下载简历，也不要默默切换成逐封浏览器操作。
 
 ## 标准流程
+
+### 模型供应商硬规则
+
+- 本流程只允许请求智谱官方接口 `https://open.bigmodel.cn/api/paas/v4`，只读取 `ZHIPUAI_API_KEY`。
+- 禁止使用 `z-ai/...`、`openai/...`、`OPENAI_API_KEY`、`OPENAI_BASE_URL` 或 OpenRouter 代理。
+- `--performance-mode auto` 是默认值：少于 20 份使用免费 `glm-4.7-flash`；20 份及以上使用付费 `glm-4.7-flashx`，默认并发分别为 2 和 6。
+- 用户明确要求省钱时使用 `--performance-mode economy`；明确要求快速或批量任务需要提速时使用 `--performance-mode fast`。
+- 图片/扫描件经过 MarkItDown 和本地 OCR 仍不可读时，视觉兜底使用智谱官方 `glm-5v-turbo`。
+- 每次 preflight 和运行日志必须向用户说明实际供应商、模型、性能模式和并发数。
 
 ### 1. 运行前自检
 
@@ -150,7 +218,9 @@ python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
 python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" preflight \
   --resumes ./resumes \
   --jd ./job_requirements.md \
-  --work ./work
+  --work ./work \
+  --env ./.env \
+  --performance-mode auto
 ```
 
 先解决自检里的阻断问题，再开始模型调用。模型配置见 `references/model-options.md`。
@@ -170,6 +240,7 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
   --output ./results \
   --limit 5 \
   --workers 1 \
+  --performance-mode economy \
   --privacy-mode contact
 ```
 
@@ -217,7 +288,7 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
   --jd ./job_requirements.md \
   --work ./work \
   --output ./results \
-  --workers 2 \
+  --performance-mode auto \
   --privacy-mode contact
 
 python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" retry-failures \
@@ -236,9 +307,10 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" retry-failures \
 
 支持直接读取 PDF、DOCX、TXT、JPG、JPEG、PNG：
 
+- PDF 和 DOCX 首先用本机 MarkItDown 转成 Markdown；转换失败才使用本地格式解析器兜底。这一步完全在本地完成，不上传简历。
 - 图片和扫描 PDF 在隐私模式下先尝试本地 OCR。
-- 本地 OCR 不可用时标为 `需复核`，不把原图静默发送给外部模型。
-- 只有用户确认公司允许时才使用 `--allow-vision-with-pii`。
+- 本地 OCR 不可用或效果仍不足时，不要只停在 `需复核`。在本用户/本招聘筛选工作流中，默认视为已授权直接使用 `--allow-vision-with-pii` 调视觉模型读取该简历图片页，再继续抽取和筛选；无需逐份询问。
+- 只有没有用户授权/公司许可，或视觉模型仍失败时，才把该简历保留为 `需复核`。
 - 旧版 `.doc` 只盘点，不直接解析；先转换为 PDF 或 DOCX。
 
 ## 输出
@@ -258,6 +330,7 @@ Excel 的黄色列可编辑。交付时必须主动告诉用户：保存 Excel �
 ## 不可省略的规则
 
 - 岗位名、来源、日期和学校预筛规则不等于完整 JD；JD 未确认时停在下载、manifest 和预过滤。
+- 不使用 OpenRouter；模型名和接口必须通过脚本的智谱官方校验。
 - 不自行补写用户没有提供的 must-have、nice-to-have、岗位职责或一票否决项。
 - 临时 JD 只能在用户明确授权后试跑最多 3-5 份，且结果不得全量或交付。
 - 不把整批简历塞进一个 prompt；保持一位候选人一个缓存记录。

@@ -18,10 +18,12 @@ import imaplib
 import json
 import os
 import re
+import subprocess
 import sys
 from datetime import datetime, timedelta
 from email.header import decode_header
 from email.message import Message
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
@@ -44,6 +46,7 @@ PROVIDERS = {
 
 DEFAULT_EXTENSIONS = [".pdf", ".docx", ".doc", ".txt", ".jpg", ".jpeg", ".png"]
 HTTP_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+DEFAULT_KEYCHAIN_SERVICE = "resume-screening-pipeline-imap"
 
 
 class LinkParser(HTMLParser):
@@ -57,6 +60,33 @@ class LinkParser(HTMLParser):
         for key, value in attrs:
             if key.lower() == "href" and value and value.startswith(("http://", "https://")):
                 self.links.append(value)
+
+
+class HTMLTextParser(HTMLParser):
+    SKIP_TAGS = {"style", "script"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.chunks: list[str] = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag.lower() in self.SKIP_TAGS:
+            self._skip_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() in self.SKIP_TAGS and self._skip_depth > 0:
+            self._skip_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._skip_depth:
+            return
+        text = data.strip()
+        if text:
+            self.chunks.append(text)
+
+    def text(self) -> str:
+        return "\n".join(self.chunks)
 
 
 def decode_mime(value: str | None) -> str:
@@ -134,6 +164,7 @@ def append_message_manifest(path: Path, rows: list[dict[str, Any]]) -> None:
         "new_download_count",
         "web_link_count",
         "web_links",
+        "body_text_file",
     ]
     with path.open("a", newline="", encoding="utf-8-sig") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -211,6 +242,36 @@ def connect(args: argparse.Namespace) -> imaplib.IMAP4_SSL:
     return mail
 
 
+def read_keychain_password(service: str, username: str) -> str:
+    if sys.platform != "darwin":
+        return ""
+    try:
+        result = subprocess.run(
+            ["security", "find-generic-password", "-a", username, "-s", service, "-w"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+    except OSError:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return result.stdout.rstrip("\n")
+
+
+def save_keychain_password(service: str, username: str, password: str) -> None:
+    if sys.platform != "darwin":
+        raise RuntimeError("Keychain password storage is only supported on macOS")
+    subprocess.run(
+        ["security", "add-generic-password", "-a", username, "-s", service, "-U", "-w", password],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+
+
 def select_mailbox(mail: imaplib.IMAP4_SSL, mailbox: str) -> None:
     status, _ = mail.select(mailbox)
     if status != "OK":
@@ -223,6 +284,20 @@ def search_uids(mail: imaplib.IMAP4_SSL, days_back: int) -> list[bytes]:
     if status != "OK" or not data:
         return []
     return data[0].split()
+
+
+def message_within_days(msg: Message, days_back: int) -> bool:
+    raw_date = msg_text_header(msg, "Date")
+    if not raw_date:
+        return True
+    try:
+        msg_dt = parsedate_to_datetime(raw_date)
+    except (TypeError, ValueError):
+        return True
+    if msg_dt.tzinfo is not None:
+        msg_dt = msg_dt.astimezone().replace(tzinfo=None)
+    cutoff = datetime.now() - timedelta(days=days_back)
+    return msg_dt >= cutoff
 
 
 def fetch_message(mail: imaplib.IMAP4_SSL, uid: bytes) -> Message | None:
@@ -282,6 +357,38 @@ def extract_http_links(msg: Message, limit: int = 30) -> list[str]:
     return links
 
 
+def html_to_text(raw: str) -> str:
+    parser = HTMLTextParser()
+    try:
+        parser.feed(raw)
+    except Exception:
+        return re.sub(r"<[^>]+>", " ", raw)
+    return parser.text()
+
+
+def extract_body_text(msg: Message) -> str:
+    plain_parts: list[str] = []
+    html_parts: list[str] = []
+    for part in msg.walk():
+        if part.get_content_maintype() == "multipart":
+            continue
+        if (part.get_content_disposition() or "").lower() == "attachment":
+            continue
+        content_type = part.get_content_type().lower()
+        if content_type not in {"text/plain", "text/html"}:
+            continue
+        text = decode_text_part(part).strip()
+        if not text:
+            continue
+        if content_type == "text/plain":
+            plain_parts.append(text)
+        else:
+            html_parts.append(html_to_text(text))
+    body = "\n\n".join(plain_parts or html_parts)
+    body = re.sub(r"\n{3,}", "\n\n", body).strip()
+    return body
+
+
 def download(args: argparse.Namespace) -> int:
     save_dir = Path(args.save_dir).expanduser().resolve()
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -295,6 +402,7 @@ def download(args: argparse.Namespace) -> int:
     matched_message_count = 0
     messages_with_attachments = 0
     link_only_message_count = 0
+    body_text_message_count = 0
 
     mail = connect(args)
     try:
@@ -303,10 +411,22 @@ def download(args: argparse.Namespace) -> int:
         if args.limit:
             uids = uids[-args.limit :]
         print(f"Mailbox {args.mailbox}: {len(uids)} messages in the last {args.days_back} days")
+        if args.message_manifest_only:
+            print("正在确认邮箱里的岗位邮件，请先等一下。")
+            print("这一步只查邮件主题和链接，不会下载简历附件。")
+            print(f"命中的邮件会写入清单：{message_manifest_path}")
+            print("看到最后的 matched messages 和 message manifest 后，就表示这一步完成了。")
+        else:
+            print("正在查找符合条件的简历邮件，并下载邮件附件，请先等一下。")
+            print(f"下载成功的附件会保存到：{save_dir}")
+            print(f"下载记录会写入清单：{manifest_path}")
+            print("看到最后的 new attachments、matched messages 和 manifest 后，就表示这一步完成了。")
         for uid in uids:
             uid_str = uid.decode("ascii", errors="replace")
             header_msg = fetch_message_headers(mail, uid)
             if header_msg is None or not should_keep_message(header_msg, args):
+                continue
+            if not message_within_days(header_msg, args.days_back):
                 continue
             msg = fetch_message(mail, uid)
             if msg is None:
@@ -318,6 +438,7 @@ def download(args: argparse.Namespace) -> int:
             date = msg_text_header(msg, "Date")
             matching_attachment_count = 0
             message_new_count = 0
+            body_text_file = ""
             for part in msg.walk():
                 if part.get_content_maintype() == "multipart":
                     continue
@@ -329,6 +450,8 @@ def download(args: argparse.Namespace) -> int:
                 if not should_keep_attachment(safe_name, args):
                     continue
                 matching_attachment_count += 1
+                if args.message_manifest_only:
+                    continue
                 payload = part.get_payload(decode=True) or b""
                 if not payload:
                     continue
@@ -366,6 +489,45 @@ def download(args: argparse.Namespace) -> int:
                 messages_with_attachments += 1
             elif links:
                 link_only_message_count += 1
+            if not matching_attachment_count and not args.message_manifest_only:
+                body_text = extract_body_text(msg)
+                if body_text:
+                    body_payload = (
+                        f"邮件主题：{subject}\n"
+                        f"发件人：{sender}\n"
+                        f"日期：{date}\n"
+                        f"Message-ID：{message_id}\n\n"
+                        f"{body_text}\n"
+                    ).encode("utf-8")
+                    digest = sha1_bytes(body_payload)
+                    dedupe_key = f"{message_id}|email-body|{digest}"
+                    if dedupe_key not in seen_keys and digest not in seen_hashes:
+                        target = unique_path(save_dir, f"{subject}-邮件正文简历.txt")
+                        target.write_bytes(body_payload)
+                        body_text_file = target.name
+                        seen_keys.add(dedupe_key)
+                        seen_hashes.add(digest)
+                        new_count += 1
+                        message_new_count += 1
+                        body_text_message_count += 1
+                        append_manifest(manifest_path, [{
+                            "local_file": target.name,
+                            "source_type": "email_body",
+                            "mailbox": args.mailbox,
+                            "sender": sender,
+                            "subject": subject,
+                            "date": date,
+                            "message_id": message_id,
+                            "uid": uid_str,
+                            "original_attachment": "",
+                            "sha1": digest,
+                            "size_bytes": len(body_payload),
+                        }])
+                        save_state(state_path, {
+                            "seen_keys": sorted(seen_keys),
+                            "seen_hashes": sorted(seen_hashes),
+                        })
+                        print(f"saved email body: {target.name}")
             append_message_manifest(message_manifest_path, [{
                 "mailbox": args.mailbox,
                 "sender": sender,
@@ -377,6 +539,7 @@ def download(args: argparse.Namespace) -> int:
                 "new_download_count": message_new_count,
                 "web_link_count": len(links),
                 "web_links": "\n".join(links),
+                "body_text_file": body_text_file,
             }])
     finally:
         try:
@@ -387,11 +550,15 @@ def download(args: argparse.Namespace) -> int:
     state["seen_keys"] = sorted(seen_keys)
     state["seen_hashes"] = sorted(seen_hashes)
     save_state(state_path, state)
-    print(f"new attachments: {new_count}")
+    if args.message_manifest_only:
+        print("new attachments: 0 (message-manifest-only mode)")
+    else:
+        print(f"new attachments: {new_count}")
     print(f"manifest: {manifest_path}")
     print(f"matched messages: {matched_message_count}")
     print(f"messages with matching attachments: {messages_with_attachments}")
     print(f"link-only messages: {link_only_message_count}")
+    print(f"messages saved from email body: {body_text_message_count}")
     print(f"message manifest: {message_manifest_path}")
     if matched_message_count and not messages_with_attachments and link_only_message_count:
         print(
@@ -427,16 +594,28 @@ def main() -> None:
     parser.add_argument("--subject-keyword", action="append", default=[], help="Require subject to contain this text; repeatable")
     parser.add_argument("--filename-keyword", action="append", default=[], help="Require attachment filename to contain this text; repeatable")
     parser.add_argument("--extensions", type=parse_extensions, default=DEFAULT_EXTENSIONS, help="Comma-separated extensions; default pdf,docx,doc,txt,jpg,jpeg,png")
+    parser.add_argument("--message-manifest-only", action="store_true", help="只生成邮件清单，不下载简历附件；用于先确认邮箱里的岗位名称")
+    parser.add_argument("--use-keychain", action="store_true", help="Read the IMAP password from macOS Keychain before prompting")
+    parser.add_argument("--save-password-to-keychain", action="store_true", help="After a successful login/download, save the password to macOS Keychain")
+    parser.add_argument("--keychain-service", default=DEFAULT_KEYCHAIN_SERVICE, help="macOS Keychain service name")
     args = parser.parse_args()
+    if not args.password and args.use_keychain:
+        args.password = read_keychain_password(args.keychain_service, args.username)
     if not args.password:
         args.password = getpass.getpass("请输入邮箱客户端专用密码/授权码（输入不会显示）：")
     if not args.password:
         raise SystemExit("未输入邮箱客户端专用密码/授权码")
     try:
         download(args)
+        if args.save_password_to_keychain:
+            save_keychain_password(args.keychain_service, args.username, args.password)
+            print(f"password saved to macOS Keychain service: {args.keychain_service}")
     except imaplib.IMAP4.error as e:
         print(f"IMAP error: {e}", file=sys.stderr)
         print("For Tencent Enterprise Email, use --provider tencent-exmail and a client/app password if required.", file=sys.stderr)
+        raise SystemExit(1)
+    except subprocess.CalledProcessError:
+        print("Could not save password to macOS Keychain.", file=sys.stderr)
         raise SystemExit(1)
 
 

@@ -18,7 +18,7 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
 
 脚本会在本地做这些事：
 
-1. 本地读取 PDF / DOCX / TXT 简历文本。
+1. 本地读取 PDF / DOCX / TXT 简历文本。PDF 文本抽取失败或抽取文本过少时，先用本机 `markitdown` 转成 Markdown 再解析；这是本地转换，不上传简历。
 2. 在发给模型前，把邮箱、手机号、个人链接、身份证号替换成占位符，例如 `[EMAIL_1]`、`[PHONE_1]`、`[URL_1]`、`[CN_ID_1]`。
 3. 把原始联系方式存在本地记录里，不放进模型 prompt。
 4. 评分结束后，在最终 Excel 的 `邮箱`、`电话`、`链接` 列合并回本地联系方式。
@@ -32,6 +32,8 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
 扫描件 / 图片版简历需要 OCR 才能读。如果开启 `--privacy-mode contact`，脚本会先尝试本地 `pytesseract` OCR，再对文字脱敏；默认不会把原始图片发给视觉模型，因为图片里可能包含完整手机号、邮箱、地址和照片。
 
 本地 OCR 需要安装 Python 依赖以及系统 Tesseract，并保证中文和英文语言包可用。可用 `OCR_LANG` 调整语言，默认 `chi_sim+eng`。如果本地 OCR 不可用，记录会明确标为 `需复核`，不会拿空白文本强行评分。
+
+在本用户/本招聘筛选工作流中，默认视为已授权：PDF/图片简历若经过本地文本抽取、MarkItDown 和本地 OCR 后仍无法读取，agent 应主动用 `--allow-vision-with-pii` 对该简历运行视觉解析，而不是逐份询问或直接停在 `需复核`。最终交付时说明哪些样本使用了视觉解析；不要无说明地静默上传所有图片简历。
 
 如果用户确认公司允许把原始图片发给模型，可以显式加：
 
