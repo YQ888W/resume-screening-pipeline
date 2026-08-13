@@ -19,6 +19,35 @@ import email_attachment_downloader as email_downloader  # noqa: E402
 
 
 class PipelineTests(unittest.TestCase):
+    def test_dotenv_does_not_load_api_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / ".env"
+            path.write_text(
+                "ZHIPUAI_API_KEY=old-secret\nEXTRACT_MODEL=glm-4.7-flash\n",
+                encoding="utf-8",
+            )
+            with patch.dict(pipeline.os.environ, {}, clear=True):
+                pipeline.load_dotenv(path)
+                self.assertNotIn("ZHIPUAI_API_KEY", pipeline.os.environ)
+                self.assertEqual(pipeline.os.environ["EXTRACT_MODEL"], "glm-4.7-flash")
+
+    def test_keychain_key_overrides_stale_process_key(self) -> None:
+        with (
+            patch.dict(pipeline.os.environ, {"ZHIPUAI_API_KEY": "old-key"}, clear=True),
+            patch.object(pipeline, "read_zhipu_key_from_keychain", return_value="new-key"),
+        ):
+            pipeline.load_runtime_credentials()
+            self.assertEqual(pipeline.os.environ["ZHIPUAI_API_KEY"], "new-key")
+
+    def test_configure_key_uses_hidden_prompt_and_keychain(self) -> None:
+        with (
+            patch.object(pipeline.getpass, "getpass", return_value="new-zhipu-key-1234567890") as prompt,
+            patch.object(pipeline, "save_zhipu_key_to_keychain") as save,
+        ):
+            pipeline.run_configure_key(None)
+        prompt.assert_called_once()
+        save.assert_called_once_with("new-zhipu-key-1234567890")
+
     def test_openrouter_models_are_rejected(self) -> None:
         for model in ("z-ai/glm-4.7-flash", "openai/gpt-4.1-mini"):
             with self.assertRaisesRegex(RuntimeError, "禁止使用 OpenRouter"):

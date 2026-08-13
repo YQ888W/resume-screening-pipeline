@@ -37,11 +37,19 @@ coding agent 适合确认 JD、查看 pilot 和解释反馈；批量读取与评
 
 ## 运行前检查
 
+首次使用先在可见终端运行：
+
+```bash
+python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" configure-key
+```
+
+看到隐藏输入提示后再粘贴新 Key。Key 保存到 macOS Keychain，后续自动读取。用 `key-status` 检查配置状态，用 `delete-key` 删除；这些命令都不会显示 Key。
+
 先运行 `preflight`。它会检查当前抽取模型和评分模型分别需要哪个 key，并在开始批量调用前直接报错。
 
 - 必须配置 `ZHIPUAI_API_KEY`。
 - 若 `EXTRACT_MODEL`、`SCREEN_MODEL` 含 `/` 或 Base URL 不是智谱官方地址，preflight 必须阻断。
-- `.env` 中的模型配置会在每次命令开始时重新读取，不需要重新启动终端。
+- `.env` 中的非敏感模型配置会在每次命令开始时重新读取，但其中的 API Key 会被忽略。
 
 认证失败、模型不存在或请求格式错误不会再长时间重复重试；限流和临时网络错误仍会自动退避重试。
 

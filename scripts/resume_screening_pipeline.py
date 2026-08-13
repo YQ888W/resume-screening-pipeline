@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import base64
 import csv
+import getpass
 import hashlib
 import io
 import json
@@ -75,6 +76,8 @@ ZHIPU_FREE_MODEL = "glm-4.7-flash"
 ZHIPU_FAST_MODEL = "glm-4.7-flashx"
 ZHIPU_VISION_MODEL = "glm-5v-turbo"
 HIGH_THROUGHPUT_THRESHOLD = 20
+ZHIPU_KEYCHAIN_SERVICE = "resume-screening-pipeline-zhipu"
+ZHIPU_KEYCHAIN_ACCOUNT = "ZHIPUAI_API_KEY"
 
 
 def is_official_zhipu_model(model: str) -> bool:
@@ -241,7 +244,79 @@ def load_dotenv(path: Path | None) -> None:
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
+        if key.strip() in {"ZHIPUAI_API_KEY", "OPENAI_API_KEY"}:
+            continue
         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def read_zhipu_key_from_keychain() -> str:
+    if sys.platform != "darwin":
+        return ""
+    proc = subprocess.run(
+        [
+            "security", "find-generic-password", "-a", ZHIPU_KEYCHAIN_ACCOUNT,
+            "-s", ZHIPU_KEYCHAIN_SERVICE, "-w",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def save_zhipu_key_to_keychain(api_key: str) -> None:
+    if sys.platform != "darwin":
+        raise RuntimeError("自动保存智谱 Key 目前只支持 macOS Keychain。")
+    subprocess.run(
+        [
+            "security", "add-generic-password", "-a", ZHIPU_KEYCHAIN_ACCOUNT,
+            "-s", ZHIPU_KEYCHAIN_SERVICE, "-U", "-w", api_key,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+def delete_zhipu_key_from_keychain() -> bool:
+    if sys.platform != "darwin":
+        return False
+    proc = subprocess.run(
+        [
+            "security", "delete-generic-password", "-a", ZHIPU_KEYCHAIN_ACCOUNT,
+            "-s", ZHIPU_KEYCHAIN_SERVICE,
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0
+
+
+def load_runtime_credentials(env_path: Path | None = None) -> None:
+    load_dotenv(env_path)
+    keychain_key = read_zhipu_key_from_keychain()
+    if keychain_key:
+        os.environ["ZHIPUAI_API_KEY"] = keychain_key
+
+
+def run_configure_key(_: argparse.Namespace) -> None:
+    api_key = getpass.getpass("请输入新的智谱 ZHIPUAI_API_KEY（输入不会显示）：").strip()
+    if len(api_key) < 20:
+        raise SystemExit("未输入有效的智谱 API Key。")
+    save_zhipu_key_to_keychain(api_key)
+    print(f"智谱 API Key 已保存到 macOS Keychain：{ZHIPU_KEYCHAIN_SERVICE}")
+    print("后续运行会自动读取；不要再把 Key 写进 .env、命令参数或聊天。")
+
+
+def run_key_status(_: argparse.Namespace) -> None:
+    exists = bool(read_zhipu_key_from_keychain())
+    print("智谱 API Key：已保存在 macOS Keychain" if exists else "智谱 API Key：Keychain 中未配置")
+
+
+def run_delete_key(_: argparse.Namespace) -> None:
+    deleted = delete_zhipu_key_from_keychain()
+    print("智谱 API Key 已从 macOS Keychain 删除" if deleted else "Keychain 中没有找到智谱 API Key")
 
 
 def sha1_file(path: Path) -> str:
@@ -1457,7 +1532,7 @@ def validate_model_configuration(models: list[str] | None = None) -> None:
 
 
 def run_preflight(args: argparse.Namespace) -> None:
-    load_dotenv(Path(args.env).expanduser().resolve() if args.env else None)
+    load_runtime_credentials(Path(args.env).expanduser().resolve() if args.env else None)
     resume_dir = Path(args.resumes).expanduser().resolve()
     work_dir = Path(args.work).expanduser().resolve()
     jd_path = Path(args.jd).expanduser().resolve()
@@ -1526,7 +1601,7 @@ def selected_files(args: argparse.Namespace) -> list[ResumeFile]:
 
 
 def run_batch(args: argparse.Namespace) -> None:
-    load_dotenv(Path(args.env).expanduser().resolve() if args.env else None)
+    load_runtime_credentials(Path(args.env).expanduser().resolve() if args.env else None)
     resume_dir = Path(args.resumes).expanduser().resolve()
     work_dir = Path(args.work).expanduser().resolve()
     output_dir = Path(args.output).expanduser().resolve()
@@ -1581,7 +1656,7 @@ def run_batch(args: argparse.Namespace) -> None:
 
 
 def run_retry_failures(args: argparse.Namespace) -> None:
-    load_dotenv(Path(args.env).expanduser().resolve() if args.env else None)
+    load_runtime_credentials(Path(args.env).expanduser().resolve() if args.env else None)
     work_dir = Path(args.work).expanduser().resolve()
     jd = load_jd(Path(args.jd).expanduser().resolve())
     require_screening_jd(jd, "retry-failures")
@@ -1615,7 +1690,7 @@ def run_retry_failures(args: argparse.Namespace) -> None:
 
 
 def run_score_only(args: argparse.Namespace) -> None:
-    load_dotenv(Path(args.env).expanduser().resolve() if args.env else None)
+    load_runtime_credentials(Path(args.env).expanduser().resolve() if args.env else None)
     work_dir = Path(args.work).expanduser().resolve()
     jd = load_jd(Path(args.jd).expanduser().resolve())
     require_screening_jd(jd, "score-only")
@@ -1648,7 +1723,7 @@ def run_score_only(args: argparse.Namespace) -> None:
 
 
 def run_calibrate(args: argparse.Namespace) -> None:
-    load_dotenv(Path(args.env).expanduser().resolve() if args.env else None)
+    load_runtime_credentials(Path(args.env).expanduser().resolve() if args.env else None)
     refresh_model_config(1, "economy")
     validate_model_configuration([SCREEN_MODEL])
     work_dir = Path(args.work).expanduser().resolve()
@@ -1740,6 +1815,9 @@ def add_run_io(parser: argparse.ArgumentParser) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Batch screen resumes against a JD.")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("configure-key", help="Securely save ZHIPUAI_API_KEY to macOS Keychain")
+    sub.add_parser("key-status", help="Check whether a Zhipu API key exists in macOS Keychain")
+    sub.add_parser("delete-key", help="Delete the Zhipu API key from macOS Keychain")
     p_inv = sub.add_parser("inventory")
     add_common_io(p_inv)
     p_inv.add_argument("--jd", required=True)
@@ -1773,7 +1851,13 @@ def main() -> None:
     p_fin.add_argument("--no-copy", action="store_true")
     args = parser.parse_args()
 
-    if args.cmd == "inventory":
+    if args.cmd == "configure-key":
+        run_configure_key(args)
+    elif args.cmd == "key-status":
+        run_key_status(args)
+    elif args.cmd == "delete-key":
+        run_delete_key(args)
+    elif args.cmd == "inventory":
         run_inventory(args)
     elif args.cmd == "preflight":
         run_preflight(args)

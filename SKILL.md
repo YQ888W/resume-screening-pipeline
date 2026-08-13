@@ -210,6 +210,30 @@ python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
 - 图片/扫描件经过 MarkItDown 和本地 OCR 仍不可读时，视觉兜底使用智谱官方 `glm-5v-turbo`。
 - 每次 preflight 和运行日志必须向用户说明实际供应商、模型、性能模式和并发数。
 
+### 安全配置智谱 Key
+
+不要让用户把 Key 发进聊天，也不要写入 `.env`。第一次使用时，让用户在**可见的 Codex 终端**运行：
+
+```bash
+python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" configure-key
+```
+
+终端出现 `请输入新的智谱 ZHIPUAI_API_KEY（输入不会显示）：` 后，用户粘贴新 Key 并回车。输入过程不会显示字符或星号；脚本会把 Key 保存到 macOS Keychain，后续筛选命令自动读取。
+
+检查是否配置成功（不会显示 Key）：
+
+```bash
+python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" key-status
+```
+
+需要撤销本机保存时：
+
+```bash
+python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" delete-key
+```
+
+流水线会忽略 `.env` 中的 `ZHIPUAI_API_KEY` 和 `OPENAI_API_KEY`，防止旧运行目录继续加载明文或失效凭据。不要让用户在普通 `%`、`$`、`#` shell 提示符后直接粘贴 Key；只有看到上述隐藏输入提示时才能粘贴。
+
 ### 1. 运行前自检
 
 安装依赖后先运行：
