@@ -130,7 +130,7 @@ def refresh_model_config(batch_size: int = 0, performance_mode: str = "auto") ->
 def effective_worker_count(requested: int) -> int:
     if requested > 0:
         return requested
-    return 6 if PERFORMANCE_MODE == "fast" else 2
+    return 12 if PERFORMANCE_MODE == "fast" else 2
 
 
 EXTRACT_SCHEMA = {
@@ -1801,7 +1801,7 @@ def add_run_io(parser: argparse.ArgumentParser) -> None:
         "--workers",
         type=int,
         default=0,
-        help="Concurrent workers; default is 2 in economy mode and 6 in fast mode",
+        help="Concurrent workers; default is 2 in economy mode and 12 in fast mode",
     )
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-copy", action="store_true")

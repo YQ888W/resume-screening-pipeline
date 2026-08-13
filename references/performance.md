@@ -40,7 +40,7 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
   --performance-mode auto
 ```
 
-20 份及以上会自动使用智谱官方付费 `glm-4.7-flashx`，默认 6 并发；少于 20 份使用免费 `glm-4.7-flash`，默认 2 并发。
+20 份及以上会自动使用智谱官方付费 `glm-4.7-flashx`，默认 12 并发；少于 20 份使用免费 `glm-4.7-flash`，默认 2 并发。
 
 ### 强制快速模式
 
@@ -55,7 +55,7 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
   --performance-mode fast
 ```
 
-快速模式默认 6 并发。只有在确认 429 / 限流错误很少时，才显式尝试 `--workers 8`；扫描件多或网络不稳时可降到 `--workers 4`。
+快速模式默认 12 并发。确认 429 / 限流错误很少时，可显式尝试 `--workers 16` 或 `--workers 24`；如果频繁出现 429、扫描件很多或网络不稳，可降到 `--workers 8` 或 `--workers 6`。
 
 ## 失败重试
 

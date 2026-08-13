@@ -79,7 +79,7 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual(pipeline.refresh_model_config(20, "auto"), "fast")
                 self.assertEqual(pipeline.EXTRACT_MODEL, "glm-4.7-flashx")
                 self.assertEqual(pipeline.SCREEN_MODEL, "glm-4.7-flashx")
-                self.assertEqual(pipeline.effective_worker_count(0), 6)
+                self.assertEqual(pipeline.effective_worker_count(0), 12)
         finally:
             (
                 pipeline.EXTRACT_MODEL,

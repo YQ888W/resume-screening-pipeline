@@ -205,7 +205,7 @@ python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
 
 - 本流程只允许请求智谱官方接口 `https://open.bigmodel.cn/api/paas/v4`，只读取 `ZHIPUAI_API_KEY`。
 - 禁止使用 `z-ai/...`、`openai/...`、`OPENAI_API_KEY`、`OPENAI_BASE_URL` 或 OpenRouter 代理。
-- `--performance-mode auto` 是默认值：少于 20 份使用免费 `glm-4.7-flash`；20 份及以上使用付费 `glm-4.7-flashx`，默认并发分别为 2 和 6。
+- `--performance-mode auto` 是默认值：少于 20 份使用免费 `glm-4.7-flash`；20 份及以上使用付费 `glm-4.7-flashx`，默认并发分别为 2 和 12。
 - 用户明确要求省钱时使用 `--performance-mode economy`；明确要求快速或批量任务需要提速时使用 `--performance-mode fast`。
 - 图片/扫描件经过 MarkItDown 和本地 OCR 仍不可读时，视觉兜底使用智谱官方 `glm-5v-turbo`。
 - 每次 preflight 和运行日志必须向用户说明实际供应商、模型、性能模式和并发数。

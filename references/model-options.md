@@ -70,6 +70,6 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" configure-key
 
 - 5 份 pilot：通常几分钟内。
 - 50 份：普通并发下适合短时间内完成。
-- 200-300 份：先跑 pilot，再使用 `--performance-mode auto`；默认付费高速模型和 6 并发，中断后可续跑。
+- 200-300 份：先跑 pilot，再使用 `--performance-mode auto`；默认付费高速模型和 12 并发，中断后可续跑。
 
 不要承诺固定分钟数。更适合承诺：可中断续跑、可失败重试、已完成的不重复付费/不重复处理。
