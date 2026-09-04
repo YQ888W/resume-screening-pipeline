@@ -95,6 +95,20 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" key-status
 - 想省钱：`--performance-mode economy`
 - 想尽快：`--performance-mode fast`
 
+## 为什么读简历不用 coding agent 自己的模型
+
+Cursor / Codex / Claude 适合确认来源、整理 JD、看小样本、解释你为什么改口径。批量读简历和打分不走对话里的这个模型，而是脚本调用智谱官方 API。
+
+原因很具体：
+
+- **脚本调不到当前聊天模型。** 流水线要按人缓存、失败重试、中断后续跑。聊天里的 agent 模型一般没有稳定、可并发的官方调用入口；硬把几十上百份塞进对话，上下文会爆，断线后也不知道哪一份算完了。
+- **一份人一条记录。** 智谱调用按候选人写成 `work/records/C####.json`，已完成的不重复计费、不重复处理。对话式逐份读做不到这个恢复粒度。
+- **供应商和账单要看得见。** 固定智谱官方接口，preflight 会报实际模型、性能模式和并发。不用 OpenRouter，也不把简历交给「当前这个 agent 碰巧是哪家模型」。
+- **成本和速度可切换。** 小样本用免费 `glm-4.7-flash`；20 份以上默认付费高速 `glm-4.7-flashx`。这是批量吞吐选择，不是觉得 agent 模型不够聪明。
+- **隐私边界更清楚。** 联系方式先在本地脱敏，再把文本发给已知的智谱官方地址。扫描件视觉兜底也会标明用了哪次视觉解析。
+
+所以分工是：agent 管流程和和你对齐口径；智谱管批量抽取和初筛。口径变化后的旧池回看，可以先本地抽文本、不重跑模型。更细的说明见 [references/model-options.md](references/model-options.md)。
+
 ## 一次筛选长什么样
 
 agent 会在你的工作目录里建本次运行文件夹，你通常只看 `job_requirements.md` 和 `results/`：
