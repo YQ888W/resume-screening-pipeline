@@ -1,4 +1,4 @@
 interface:
   display_name: "简历批量筛选流水线"
   short_description: "从 JD 和简历批量生成可反馈修正的初筛表"
-  default_prompt: "用 $resume-screening-pipeline 批量处理简历。先确认简历来源和完整 JD；JD 不完整时只做下载、manifest 和学校预筛，然后问我：请提供完整 JD，或确认是否仅先完成下载和学校预筛。PDF/DOCX 先在本地用 MarkItDown 转成 Markdown 并脱敏，后续只调用智谱官方 API，禁止使用 OpenRouter。3-5 份 pilot 用免费 GLM；20 份及以上自动使用付费 GLM FlashX 和默认 12 并发，不必重复询问。preflight 和运行时告诉我实际模型、供应商、性能模式和并发数。"
+  default_prompt: "用 $resume-screening-pipeline 批量处理简历。先确认简历来源和完整 JD；JD 不完整时只做下载、manifest 和学校预筛，然后问我：请提供完整 JD，或确认是否仅先完成下载和学校预筛。口径变化或要回看旧池时，先按新口径本地盘点，不要自动重跑全量 AI。PDF/DOCX 先在本地用 MarkItDown 转成 Markdown 并脱敏，后续只调用智谱官方 API，禁止使用 OpenRouter。3-5 份 pilot 用免费 GLM；20 份及以上自动使用付费 GLM FlashX 和默认 12 并发，不必重复询问。写入飞书表时先读现表，不自动填约面，手机号和邮箱独立成列。preflight 和运行时告诉我实际模型、供应商、性能模式和并发数。"

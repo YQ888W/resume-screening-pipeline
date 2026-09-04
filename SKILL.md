@@ -1,6 +1,6 @@
 ---
 name: resume-screening-pipeline
-description: 当用户要批量筛选简历、对照 JD 初筛候选人、从邮箱/招聘网站/飞书/ATS/云盘/本地文件夹收集简历、生成可人工反馈的 Excel、按岗位和推荐等级整理简历，或根据 HR 反馈修正筛选口径时使用。启动时先确认简历来源和完整 JD；下载过滤规则不能替代岗位 JD。JD 未确认时只收集和预过滤简历，不得开始 AI 筛选或全量处理。
+description: 当用户要批量筛选简历、对照 JD 初筛候选人、从邮箱/招聘网站/飞书/ATS/云盘/本地文件夹收集简历、生成可人工反馈的 Excel、按岗位和推荐等级整理简历、根据 HR 反馈或口头修正筛选口径、回看旧简历池，或把初筛结果写入飞书多维表格时使用。启动时先确认简历来源和完整 JD；下载过滤规则不能替代岗位 JD。JD 未确认时只收集和预过滤简历，不得开始 AI 筛选或全量处理。口径变化时默认先回看旧池，不要自动重跑全量 AI。
 ---
 
 # 简历批量筛选流水线
@@ -20,8 +20,11 @@ description: 当用户要批量筛选简历、对照 JD 初筛候选人、从邮
 - 3-5 份 pilot 默认用免费 `glm-4.7-flash`；20 份及以上的批量在 `auto` 模式下自动使用付费高速 `glm-4.7-flashx` 和更高并发。用户已授权为效率使用该付费模型，不必每批重复询问。
 - 本用户/本招聘筛选工作流已默认授权：如果 PDF/图片简历用本地文本抽取、MarkItDown 和本地 OCR 仍读不出来，不需要逐份再问；agent 应主动用视觉模型读取该简历并继续筛选，命令中加 `--allow-vision-with-pii`。不要把这写成“无条件静默上传所有图片简历”：最终结果里仍必须说明哪些样本使用了视觉解析。
 - 主动说明 Excel 的黄色两列可以手填，保存后可让 AI 校准筛选标准。
+- 用户口头修正筛选口径后以最新口径为准；旧口径保留并标日期，不覆盖。
+- 口径变化或要求回看旧池时，默认先本地对照新口径盘点，不要自动重跑智谱全量。细节见 `references/criteria-revision.md`。
+- 本用户交付常写飞书多维表格，不只 Excel。写入前先读现表；不自动填写约面状态；手机号和邮箱必须独立成列。细节见 `references/feishu-delivery.md`。
 
-没有技术背景的用户先读 `references/hr-quickstart.md`。岗位需求不完整时读 `references/jd-intake.md`；只追问会影响结果的关键问题。
+没有技术背景的用户先读 `references/hr-quickstart.md`。岗位需求不完整时读 `references/jd-intake.md`；只追问会影响结果的关键问题。口径变化或旧池回看读 `references/criteria-revision.md`。写飞书表读 `references/feishu-delivery.md`。
 
 ## 第 0 步：确认简历来源
 
@@ -82,6 +85,10 @@ JD 不完整时，agent 只能继续做：来源确认、邮箱/平台下载、`
 
 回归场景：若已下载 186 个附件、按学校预过滤后保留 122 个，但用户没有提供真实 JD，正确状态是“来源收集/预过滤完成，等待 JD”。任何已产生的模型筛选结果都只能视为临时草稿，不能作为最终交付。
 
+## 口径变化与旧池回看
+
+用户说口径变了、新 JD 还没有、或要盘点旧批次被卡住的人时，不要开全量 AI。先定位旧 `screening-run` 和岗位级增量游标，新口径另建本次目录，旧口径整段留着标日期。增量下载继续写入旧岗位 `resumes/`。回看用本地抽文本 + 旧结果对照，旧 `AI 初筛结果` 只代表旧 JD。完整步骤见 `references/criteria-revision.md`。
+
 ## 前置确认
 
 来源确认后、进入任何 AI 筛选前再确认：
@@ -129,7 +136,7 @@ python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
   --subject-keyword 简历
 ```
 
-如果用户觉得每次输入授权码麻烦，优先使用 macOS Keychain，而不是把密码明文写进项目文件、shell history、`.env` 或命令参数。第一次保存时，在可见 Codex 终端运行下载命令并加 `--save-password-to-keychain`；脚本仍会用隐藏提示读取一次授权码，登录/下载成功后才保存：
+如果用户觉得每次输入授权码麻烦，优先使用 macOS Keychain，而不是把密码明文写进项目文件、shell history、`.env` 或命令参数。第一次保存时，在可见终端（Cursor 或 Codex）运行下载命令并加 `--save-password-to-keychain`；脚本仍会用隐藏提示读取一次授权码，登录/下载成功后才保存：
 
 ```bash
 python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
@@ -150,8 +157,20 @@ python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
   --save-dir ./resumes \
   --days-back 30 \
   --subject-keyword 简历 \
-  --use-keychain
+  --use-keychain \
+  --incremental \
+  --incremental-state ./work/email_cursor.json
 ```
+
+日常追加“刚刚收来的简历”时必须优先使用 `--incremental`，不要每次重新扫最近 7/30 天全量邮件。增量模式会在 JSON state 中按账号、mailbox、发件人/主题/附件过滤条件分别保存：
+
+- `last_seen_uid`：上次扫描到的最大 IMAP UID；下次只搜索 `UID > last_seen_uid` 的新邮件。
+- `processed_message_ids`：已经处理过的 Message-ID；即使 UID 游标回退也不会重复下载/记清单。
+- `seen_keys` / `seen_hashes`：附件和正文简历去重信息。
+
+如果不传 `--incremental-state`，状态默认写到 `--save-dir` 下的 `.email_download_state.json`；推荐每个岗位写到 `./work/email_cursor_<role>.json`，避免换岗位、换过滤条件时互相影响。第一次运行没有游标时仍会按 `--days-back` 初始化扫描；完成后会写入最大 UID，之后同一过滤条件的增量扫描通常只检查新邮件。
+
+为避免本地重复保存同一份简历，日常邮箱下载应复用同一个岗位级 `--incremental-state`，不要每次新建临时下载目录重新扫最近 7/30 天；后续筛选输入、结果分拣和人工查看目录优先使用硬链接或软链接，只有跨磁盘/系统不支持链接时才复制真实文件。
 
 Keychain 默认 service 是 `resume-screening-pipeline-imap`；如同一台机器要区分多套邮箱凭据，可加 `--keychain-service <name>`。即使用 Keychain，也不要在聊天、命令行参数或仓库文件中明文记录邮箱授权码。
 
@@ -162,10 +181,10 @@ Keychain 默认 service 是 `resume-screening-pipeline-imap`；如同一台机�
 如果下载器需要邮箱客户端专用密码/授权码，必须先说清楚输入发生在哪里：
 
 - 如果 agent 用 `exec_command` 等后台工具会话启动下载器，用户通常看不到也无法直接输入该隐藏提示。不要让用户“点终端区域”去输入，因为这会把授权码输进普通 shell，导致 `zsh: command not found`，还可能泄露授权码。
-- 需要用户亲自输入授权码时，优先让用户在可见的 Codex 终端里运行完整下载命令；只有终端明确显示 `请输入邮箱客户端专用密码/授权码（输入不会显示）：` 后，才让用户粘贴授权码并回车。说明输入时不会显示字符或星号。
+- 需要用户亲自输入授权码时，优先让用户在可见终端（Cursor 或 Codex）里运行完整下载命令；只有终端明确显示 `请输入邮箱客户端专用密码/授权码（输入不会显示）：` 后，才让用户粘贴授权码并回车。说明输入时不会显示字符或星号。
 - 如果必须由 agent 继续后台会话，先解释风险并征得用户同意，让用户提供一次性/临时授权码；agent 只写入等待中的进程，不复述、不记录，用完提醒用户作废或轮换。
 - 任何情况下，不要让用户在普通 `%`、`$`、`#` shell 提示符后输入授权码。若用户已经误输，提醒其撤销/轮换该授权码。
-- 当用户在可见 Codex 终端里自行跑完下载器后，提醒用户不要重复输入授权码、不要重复运行下载命令；只需要告诉 agent“跑完了”或保留终端输出。随后 agent 应读取终端输出或 `_source_manifest.csv` / `_email_message_manifest.csv`，继续学校预筛、JD 校验和筛选流程。若 agent 无法读取可见终端输出，再请用户粘贴下载器的最终统计摘要。
+- 当用户在可见终端里自行跑完下载器后，提醒用户不要重复输入授权码、不要重复运行下载命令；只需要告诉 agent“跑完了”或保留终端输出。随后 agent 应读取终端输出或 `_source_manifest.csv` / `_email_message_manifest.csv`，继续学校预筛、JD 校验和筛选流程。若 agent 无法读取可见终端输出，再请用户粘贴下载器的最终统计摘要。
 
 下载器生成 `_source_manifest.csv`，多岗位筛选会把邮件标题作为投递岗位提示。来源只能用于路由和追溯，不能作为匹配证据。
 
@@ -209,10 +228,11 @@ python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
 - 用户明确要求省钱时使用 `--performance-mode economy`；明确要求快速或批量任务需要提速时使用 `--performance-mode fast`。
 - 图片/扫描件经过 MarkItDown 和本地 OCR 仍不可读时，视觉兜底使用智谱官方 `glm-5v-turbo`。
 - 每次 preflight 和运行日志必须向用户说明实际供应商、模型、性能模式和并发数。
+- 每次真实调用智谱后，候选人缓存记录必须保存可追溯但不泄露密钥的审计信息：`response_id`、`usage`、模型、官方接口、HTTP 状态、`key_sha256_prefix` 和 `key_partial`。不得保存完整 API key。
 
 ### 安全配置智谱 Key
 
-不要让用户把 Key 发进聊天，也不要写入 `.env`。第一次使用时，让用户在**可见的 Codex 终端**运行：
+不要让用户把 Key 发进聊天，也不要写入 `.env`。第一次使用时，让用户在**可见终端（Cursor 或 Codex）**运行：
 
 ```bash
 python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" configure-key
@@ -269,6 +289,8 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" run \
 ```
 
 候选人 ID 由 `work/candidate_index.json` 持久保存。缓存会校验文件 hash、JD、模型和隐私模式；不要手动复用其他岗位的 `work/`。
+
+每条候选人缓存记录会在 `model_api_calls`、`extract_api_audit`、`screen_api_audit` 中记录智谱官方接口返回的 `response_id` 和 token `usage`；如果使用视觉兜底，会额外记录 `vision_api_audit`。这些字段只含 key 指纹和截断片段，不含完整 API key，可用于和智谱后台排查用量显示问题。
 
 ### 3. 收集人工反馈并校准
 
@@ -351,6 +373,8 @@ python3 "$SKILL_DIR/scripts/resume_screening_pipeline.py" retry-failures \
 
 Excel 的黄色列可编辑。交付时必须主动告诉用户：保存 Excel 后，让 agent 读取该文件，即可总结反馈、确认筛选标准修正并重评。
 
+用户要求写入飞书多维表格时，Excel 仍先留在 `results/` 作底稿；飞书写入规则见 `references/feishu-delivery.md`。不要自动填写约面状态；手机号和邮箱写成独立列，不要只堆在备注里。
+
 ## 不可省略的规则
 
 - 岗位名、来源、日期和学校预筛规则不等于完整 JD；JD 未确认时停在下载、manifest 和预过滤。
@@ -362,5 +386,9 @@ Excel 的黄色列可编辑。交付时必须主动告诉用户：保存 Excel �
 - 不编造简历未写的事实；信息不足时标为 `需复核` 或 `备选`。
 - 不因邮件来源、文件夹名或招聘渠道本身提高或降低推荐等级。
 - 不自动把校准建议写进 JD；先让招聘负责人确认。
+- 用户口头改口径后立即按新口径判断；旧口径保留并标日期，不覆盖，也不把旧 AI 等级直接当成新结论。
+- 口径变化或旧池回看时，不自动重跑智谱全量；先本地回看。完整新 JD 未确认前，回看结果也只是草稿。
+- 不自动填写约面/面试安排。新记录默认待确认；重叠人选先对齐已有相关表。
+- 写入飞书或其他外部表时，手机号和邮箱必须独立成列。
 - 不公开上传真实简历、带联系方式的结果、`work/records/` 或 `work/all_records.json`。
 - 不把邮箱授权码、API key 写进仓库、命令参数或公开截图。

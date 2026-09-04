@@ -236,6 +236,12 @@ class ResumeFile:
     sha1: str
 
 
+@dataclass(frozen=True)
+class ChatCompletionResult:
+    content: str
+    audit: dict[str, Any]
+
+
 def load_dotenv(path: Path | None) -> None:
     if not path or not path.exists():
         return
@@ -563,7 +569,35 @@ def api_headers(model: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
 
-def chat_completion(model: str, messages: list[dict[str, Any]], max_tokens: int, temperature: float) -> str:
+def current_zhipu_key_audit() -> dict[str, Any]:
+    key = os.getenv("ZHIPUAI_API_KEY", "").strip()
+    if not key:
+        return {}
+    return {
+        "key_sha256_prefix": hashlib.sha256(key.encode("utf-8")).hexdigest()[:12],
+        "key_partial": f"{key[:4]}...{key[-4:]}" if len(key) >= 8 else "",
+        "key_length": len(key),
+        "keychain_service": ZHIPU_KEYCHAIN_SERVICE,
+        "keychain_account": ZHIPU_KEYCHAIN_ACCOUNT,
+    }
+
+
+def completion_content_and_audit(result: Any) -> tuple[str, dict[str, Any]]:
+    if isinstance(result, ChatCompletionResult):
+        return result.content, result.audit
+    return str(result or ""), {}
+
+
+def append_model_audit(record: dict[str, Any], stage: str, audit: dict[str, Any]) -> None:
+    if not audit:
+        return
+    calls = record.setdefault("model_api_calls", [])
+    if isinstance(calls, list):
+        calls.append({"stage": stage, **audit})
+    record[f"{stage}_api_audit"] = audit
+
+
+def chat_completion(model: str, messages: list[dict[str, Any]], max_tokens: int, temperature: float) -> ChatCompletionResult:
     url = api_base(model).rstrip("/") + "/chat/completions"
     headers = api_headers(model)
     payload = {
@@ -586,7 +620,20 @@ def chat_completion(model: str, messages: list[dict[str, Any]], max_tokens: int,
             content = data["choices"][0]["message"].get("content") or ""
             if not content.strip():
                 raise RuntimeError(f"empty response: {str(data)[:500]}")
-            return content
+            audit = {
+                "provider": MODEL_PROVIDER,
+                "api_base": api_base(model),
+                "endpoint": "/chat/completions",
+                "model": data.get("model") or model,
+                "requested_model": model,
+                "response_id": data.get("id", ""),
+                "created": data.get("created", ""),
+                "usage": data.get("usage") or {},
+                "http_status": r.status_code,
+                "attempt": attempt + 1,
+            }
+            audit.update(current_zhipu_key_audit())
+            return ChatCompletionResult(content=content, audit=audit)
         except RuntimeError as e:
             if str(e).startswith("模型配置或请求无效"):
                 raise
@@ -782,7 +829,7 @@ def load_jd(path: Path) -> dict[str, Any]:
     }
 
 
-def vision_extract_text(path: Path) -> str:
+def vision_extract_text_with_audit(path: Path) -> tuple[str, dict[str, Any]]:
     content: list[dict[str, Any]] = [
         {
             "type": "text",
@@ -794,7 +841,13 @@ def vision_extract_text(path: Path) -> str:
             content.append({"type": "image_url", "image_url": {"url": url}})
     else:
         content.append({"type": "image_url", "image_url": {"url": image_to_data_url(path)}})
-    return chat_completion(VISION_MODEL, [{"role": "user", "content": content}], max_tokens=6000, temperature=0)
+    result = chat_completion(VISION_MODEL, [{"role": "user", "content": content}], max_tokens=6000, temperature=0)
+    return completion_content_and_audit(result)
+
+
+def vision_extract_text(path: Path) -> str:
+    text, _audit = vision_extract_text_with_audit(path)
+    return text
 
 
 def redact_pii_text(text: str, mode: str = "contact") -> tuple[str, dict[str, list[str]]]:
@@ -944,7 +997,8 @@ def process_one(
             parse_meta["vision_skipped_for_privacy"] = True
         elif parse_meta.get("needs_vision"):
             try:
-                vtext = vision_extract_text(resume.path)
+                vtext, vision_audit = vision_extract_text_with_audit(resume.path)
+                parse_meta["vision_api_audit"] = vision_audit
                 if len(vtext.strip()) > len(text.strip()):
                     text = vtext
                     parse_meta["parse_status"] = "vision_text"
@@ -977,6 +1031,8 @@ def process_one(
     }
     if feedback_map and resume.candidate_id in feedback_map:
         record["human_feedback"] = feedback_map[resume.candidate_id]
+    if isinstance(parse_meta.get("vision_api_audit"), dict):
+        append_model_audit(record, "vision", parse_meta["vision_api_audit"])
 
     if len(text.strip()) < 40:
         reason = "简历没有可用于筛选的文本。"
@@ -992,7 +1048,9 @@ def process_one(
         return record
 
     try:
-        raw = chat_completion(EXTRACT_MODEL, extraction_prompt(resume, redacted_text, parse_meta, privacy_mode), max_tokens=7000, temperature=0.05)
+        extract_result = chat_completion(EXTRACT_MODEL, extraction_prompt(resume, redacted_text, parse_meta, privacy_mode), max_tokens=7000, temperature=0.05)
+        raw, extract_audit = completion_content_and_audit(extract_result)
+        append_model_audit(record, "extract", extract_audit)
         record["extraction"] = normalize_extraction(parse_json_object(raw))
         record["extract_status"] = "ok"
     except Exception as e:
@@ -1003,7 +1061,9 @@ def process_one(
             record["extract_raw_excerpt"] = raw[:1200]
 
     try:
-        raw_score = chat_completion(SCREEN_MODEL, score_prompt(record, jd), max_tokens=6000, temperature=0.1)
+        screen_result = chat_completion(SCREEN_MODEL, score_prompt(record, jd), max_tokens=6000, temperature=0.1)
+        raw_score, screen_audit = completion_content_and_audit(screen_result)
+        append_model_audit(record, "screen", screen_audit)
         record["screening"] = normalize_screening(parse_json_object(raw_score))
         record["screen_status"] = "ok"
     except Exception as e:
@@ -1017,7 +1077,9 @@ def process_one(
 
 def rescore_record(record: dict[str, Any], jd: dict[str, Any], path: Path) -> dict[str, Any]:
     try:
-        raw_score = chat_completion(SCREEN_MODEL, score_prompt(record, jd), max_tokens=6000, temperature=0.1)
+        screen_result = chat_completion(SCREEN_MODEL, score_prompt(record, jd), max_tokens=6000, temperature=0.1)
+        raw_score, screen_audit = completion_content_and_audit(screen_result)
+        append_model_audit(record, "screen", screen_audit)
         record["screening"] = normalize_screening(parse_json_object(raw_score))
         record["screen_status"] = "ok"
         record["screen_model"] = SCREEN_MODEL
@@ -1485,7 +1547,10 @@ def copy_categorized(records: list[dict[str, Any]], resume_dir: Path, output_dir
             dest = target_folder / f"{base[:160]}_{n}{src.suffix}"
             n += 1
         used.add(str(dest))
-        shutil.copy2(src, dest)
+        try:
+            os.link(src, dest)
+        except OSError:
+            shutil.copy2(src, dest)
 
 
 def run_inventory(args: argparse.Namespace) -> None:
@@ -1744,9 +1809,12 @@ def run_calibrate(args: argparse.Namespace) -> None:
             selected.append(item)
     if not selected:
         raise RuntimeError("反馈中的 Candidate ID 与当前缓存记录不匹配。")
-    raw = chat_completion(SCREEN_MODEL, calibration_prompt(jd, selected), max_tokens=3600, temperature=0.1)
+    calibration_result = chat_completion(SCREEN_MODEL, calibration_prompt(jd, selected), max_tokens=3600, temperature=0.1)
+    raw, calibration_audit = completion_content_and_audit(calibration_result)
     calibration = parse_json_object(raw)
     calibration["feedback_count"] = len(selected)
+    if calibration_audit:
+        calibration["api_audit"] = calibration_audit
     json_path = output_dir / "feedback_calibration.json"
     md_path = output_dir / "feedback_calibration.md"
     json_path.write_text(json.dumps(calibration, ensure_ascii=False, indent=2), encoding="utf-8")

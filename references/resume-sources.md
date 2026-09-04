@@ -23,7 +23,7 @@
 
 直接读取 PDF、DOCX、TXT、JPG、JPEG、PNG。PDF 文本抽取失败或抽取文本过少时，先用本机 `markitdown` 转成 Markdown 再解析。旧版 `.doc` 会在 inventory 中标记，但需要先转换成 PDF 或 DOCX。
 
-将源文件复制到本次运行目录。保留原文件名；候选人 ID 由 `work/candidate_index.json` 稳定维护，不依赖文件排序。
+将源文件复制到本次运行目录。保留原文件名；候选人 ID 由 `work/candidate_index.json` 稳定维护，不依赖文件排序。同一岗位追加或回看时，优先复用旧 `screening-run` 的 `resumes/` 和岗位级增量游标；本次目录用硬链接或软链接，不要另开临时下载目录重扫全量邮件。
 
 ## 邮箱附件/正文简历
 
@@ -59,7 +59,7 @@ python3 "$SKILL_DIR/scripts/email_attachment_downloader.py" \
 2. 有权限时下载附件，并保留候选人记录 ID 到本地文件名的映射。
 3. 没权限时让用户从系统批量导出，不要求用户逐份下载。
 4. 元数据 CSV 放在 `resumes/` 同级或保留为来源 manifest。
-5. 只有用户明确要求并确认后，才把筛选结果写回外部系统。
+5. 只有用户明确要求并确认后，才把筛选结果写回外部系统。写入飞书多维表格时走 `feishu-delivery.md` 和 `lark-base` skill。
 
 ## 去重和追溯
 

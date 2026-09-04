@@ -39,6 +39,37 @@ class PipelineTests(unittest.TestCase):
             pipeline.load_runtime_credentials()
             self.assertEqual(pipeline.os.environ["ZHIPUAI_API_KEY"], "new-key")
 
+    def test_chat_completion_returns_safe_api_audit(self) -> None:
+        class FakeResponse:
+            status_code = 200
+            text = ""
+
+            def json(self) -> dict:
+                return {
+                    "id": "resp_123",
+                    "created": 1786676273,
+                    "model": "glm-4.7-flash",
+                    "choices": [{"message": {"content": "{\"ok\": true}"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+                }
+
+        with (
+            patch.dict(pipeline.os.environ, {"ZHIPUAI_API_KEY": "8fa4-secret-ZvVo"}, clear=True),
+            patch.object(pipeline.requests, "post", return_value=FakeResponse()),
+        ):
+            result = pipeline.chat_completion(
+                "glm-4.7-flash",
+                [{"role": "user", "content": "ping"}],
+                max_tokens=8,
+                temperature=0,
+            )
+        self.assertEqual(result.content, "{\"ok\": true}")
+        self.assertEqual(result.audit["response_id"], "resp_123")
+        self.assertEqual(result.audit["usage"]["total_tokens"], 3)
+        self.assertEqual(result.audit["key_partial"], "8fa4...ZvVo")
+        self.assertIn("key_sha256_prefix", result.audit)
+        self.assertNotIn("8fa4-secret-ZvVo", json.dumps(result.audit, ensure_ascii=False))
+
     def test_configure_key_uses_hidden_prompt_and_keychain(self) -> None:
         with (
             patch.object(pipeline.getpass, "getpass", return_value="new-zhipu-key-1234567890") as prompt,
@@ -288,6 +319,28 @@ class PipelineTests(unittest.TestCase):
                 pipeline.process_one(resume, {"raw_jd": "JD version two"}, root / "work")
             self.assertEqual(mocked.call_count, 3)
 
+    def test_process_one_persists_model_api_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            resume_path = root / "candidate.txt"
+            resume_path.write_text("B2B SaaS finance operations experience " * 12, encoding="utf-8")
+            resume = pipeline.ResumeFile("C0001", resume_path, resume_path.name, pipeline.sha1_file(resume_path))
+            extraction = pipeline.ChatCompletionResult(
+                content=json.dumps({"name": "测试候选人", "short_summary": "财务运营"}, ensure_ascii=False),
+                audit={"response_id": "extract_resp", "usage": {"total_tokens": 10}, "key_partial": "8fa4...ZvVo"},
+            )
+            screening = pipeline.ChatCompletionResult(
+                content=json.dumps({"recommendation_level": "推荐", "one_line_recommendation_reason": "匹配"}, ensure_ascii=False),
+                audit={"response_id": "screen_resp", "usage": {"total_tokens": 20}, "key_partial": "8fa4...ZvVo"},
+            )
+            with patch.object(pipeline, "chat_completion", side_effect=[extraction, screening]):
+                record = pipeline.process_one(resume, {"raw_jd": "JD version one"}, root / "work")
+            self.assertEqual(record["extract_api_audit"]["response_id"], "extract_resp")
+            self.assertEqual(record["screen_api_audit"]["response_id"], "screen_resp")
+            self.assertEqual([call["stage"] for call in record["model_api_calls"]], ["extract", "screen"])
+            saved = json.loads((root / "work" / "records" / "C0001.json").read_text(encoding="utf-8"))
+            self.assertEqual(saved["model_api_calls"][1]["usage"]["total_tokens"], 20)
+
     def test_invalid_model_label_becomes_manual_review(self) -> None:
         result = pipeline.normalize_screening({"recommendation_level": "A+"})
         self.assertEqual(result["recommendation_level"], "需复核")
@@ -378,6 +431,32 @@ class PipelineTests(unittest.TestCase):
             with path.open(newline="", encoding="utf-8-sig") as handle:
                 saved = list(csv.DictReader(handle))
             self.assertEqual(saved[0]["web_link_count"], "1")
+
+    def test_email_state_supports_incremental_cursors(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            state = email_downloader.load_state(Path(raw) / "missing.json")
+        self.assertIn("cursors", state)
+        self.assertEqual(state["seen_keys"], [])
+        self.assertEqual(state["seen_hashes"], [])
+
+    def test_email_incremental_search_uses_next_uid(self) -> None:
+        class FakeMail:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def uid(self, *args):
+                self.calls.append(args)
+                return "OK", [b"12 13"]
+
+        mail = FakeMail()
+        self.assertEqual(email_downloader.search_new_uids(mail, 11), [b"12", b"13"])
+        self.assertEqual(mail.calls[0], ("search", None, "(UID 12:*)"))
+
+    def test_skill_documents_incremental_email_scan(self) -> None:
+        skill_text = (Path(__file__).resolve().parents[1] / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("--incremental", skill_text)
+        self.assertIn("last_seen_uid", skill_text)
+        self.assertIn("processed_message_ids", skill_text)
 
 
 if __name__ == "__main__":
